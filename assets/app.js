@@ -297,10 +297,12 @@ function renderTopbar() {
     <div class="seg" id="envSeg">
       ${Object.entries(envMap).map(([k, v]) => `<button class="${S.env === k ? 'on' : ''}" data-env="${k}">${v}</button>`).join('')}
     </div>
-    <div class="search">
+    <div class="search gsearch">
       ${icon('search', '', 14)}
-      <input placeholder="搜索应用 / 组件 / 工作负载" />
+      <input id="gsearch" placeholder="搜索应用 / 组件 / 工作负载" autocomplete="off"
+        oninput="globalSearch(this.value)" onkeydown="globalSearchKey(event)" />
       <kbd>F</kbd>
+      <div class="gs-list" id="gsList"></div>
     </div>
     <button class="icon-btn" title="帮助">${icon('help', '', 16)}</button>
     <button class="icon-btn" title="告警" onclick="location.hash='/ops/alerts'">${icon('bell', '', 16)}<span class="dot-red"></span></button>
@@ -316,6 +318,57 @@ function renderTopbar() {
   });
 }
 function setCrumb(t) { const e = $('#crumbCur'); if (e) e.textContent = t; }
+
+/* 顶栏全局搜索：应用 / 组件 / 工作负载三层的跨页跳转 */
+function globalSearch(q) {
+  const box = $('#gsList');
+  if (!box) return;
+  const v = String(q || '').trim().toLowerCase();
+  if (!v) { box.classList.remove('on'); box.innerHTML = ''; return; }
+  const hits = [];
+  DB.apps.forEach(a => {
+    if (a.name.toLowerCase().includes(v)) hits.push({ k: '应用', n: a.name, d: `${a.domain} · ${a.owner}`, h: `#/apps/${a.id}` });
+    a.components.forEach(c => {
+      if (c.name.toLowerCase().includes(v)) hits.push({ k: '组件', n: c.name, d: `${a.name} · ${c.role || ''} · ${c.version}`, h: `#/apps/${a.id}/components`, comp: c.name });
+      c.workloads.forEach(w => {
+        if (w.name.toLowerCase().includes(v)) hits.push({ k: '负载', n: w.name, d: `${a.name} / ${c.name} · ${w.kind}`, h: wlUrl(a.id, c.name, w.name) });
+      });
+    });
+  });
+  box.innerHTML = hits.length
+    ? hits.slice(0, 8).map(x => `<div class="gs-item" data-h="${esc(x.h)}" data-comp="${esc(x.comp || '')}" onclick="globalGo(this)">
+        <span class="chip">${x.k}</span><b>${esc(x.n)}</b><span class="tiny muted">${esc(x.d)}</span>
+      </div>`).join('')
+    : '<div class="gs-empty">没有匹配的应用 / 组件 / 工作负载</div>';
+  box.classList.add('on');
+}
+function globalGo(el) {
+  if (el.dataset.comp) S.appComp = el.dataset.comp;
+  location.hash = el.dataset.h;
+  const inp = $('#gsearch'); if (inp) inp.value = '';
+  const box = $('#gsList'); if (box) { box.classList.remove('on'); box.innerHTML = ''; }
+}
+function globalSearchKey(e) {
+  const box = $('#gsList');
+  if (e.key === 'Escape') { e.target.value = ''; box.classList.remove('on'); box.innerHTML = ''; return; }
+  if (e.key === 'Enter') {
+    const first = box && box.querySelector('.gs-item');
+    if (first) globalGo(first);
+  }
+}
+document.addEventListener('keydown', e => {
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (e.key === 'f' && !e.metaKey && !e.ctrlKey && !/INPUT|TEXTAREA|SELECT/.test(tag)) {
+    const inp = $('#gsearch');
+    if (inp) { e.preventDefault(); inp.focus(); inp.select(); }
+  }
+});
+document.addEventListener('click', e => {
+  const box = $('#gsList');
+  if (box && box.classList.contains('on') && !e.target.closest('.gsearch')) {
+    box.classList.remove('on'); box.innerHTML = '';
+  }
+});
 
 /* ---------------- Toast / Modal ---------------- */
 function toast(msg, kind = '') {
@@ -707,6 +760,23 @@ function viewOverview() {
 }
 
 /* ---------- 应用列表 ---------- */
+/* 通用前端过滤：列表项用 data-q 承载可搜索文本，data-status 承载状态值 */
+function listFilter(rootSel, v) {
+  const q = String(v || '').trim().toLowerCase();
+  document.querySelectorAll(`${rootSel} [data-q]`).forEach(el => {
+    el.style.display = !q || (el.dataset.q || '').toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+function listStatus(rootSel, status, btn) {
+  if (btn) {
+    btn.parentElement.querySelectorAll('.filter-pill').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+  }
+  document.querySelectorAll(`${rootSel} [data-q]`).forEach(el => {
+    el.style.display = status === 'all' || el.dataset.status === status ? '' : 'none';
+  });
+}
+
 function viewApps() {
   setCrumb('应用列表');
   if (!DB.apps.length) {
@@ -732,15 +802,15 @@ function viewApps() {
       <div class="sub">应用是业务交付单元，下辖若干组件，组件进一步展开为工作负载。</div>
     </div>
     <div class="acts">
-      <div class="search" style="margin:0;width:200px">${icon('search', '', 14)}<input placeholder="搜索应用" /></div>
+      <div class="search" style="margin:0;width:200px">${icon('search', '', 14)}<input placeholder="搜索应用 / 业务域 / 负责人" oninput="listFilter('#appsGrid', this.value)" /></div>
       <button class="btn primary" onclick="newApp()">${icon('plus', '', 14)}新建应用</button>
     </div>
   </div>
 
-  <div class="grid g3">
+  <div class="grid g3" id="appsGrid">
     ${DB.apps.map(a => {
       const wlCount = a.components.reduce((s, c) => s + c.workloads.length, 0);
-      return `<div class="card" style="cursor:pointer;transition:.16s" onclick="location.hash='/apps/${a.id}'"
+      return `<div class="card" style="cursor:pointer;transition:.16s" data-q="${esc(a.name)} ${esc(a.domain)} ${esc(a.owner)} ${esc(a.desc)}" onclick="location.hash='/apps/${a.id}'"
         onmouseover="this.style.boxShadow='var(--shadow)';this.style.transform='translateY(-1px)'"
         onmouseout="this.style.boxShadow='var(--shadow-sm)';this.style.transform='none'">
         <div class="card-body">
@@ -1087,7 +1157,11 @@ function appTabBody(app) {
     </div>`;
   }
 
-  if (S.appTab === 'config') return appConfigView(app);
+  if (S.appTab === 'config') {
+    // 作用域可能停在上一个应用的组件上，切应用后回落到全部
+    if (S.cfgScope !== 'all-app' && S.cfgScope !== 'all' && !app.components.some(c => c.name === S.cfgScope)) S.cfgScope = 'all-app';
+    return appConfigView(app);
+  }
 
   return `<div class="tl" style="max-width:760px">
     ${app.events.map(e => `<div class="tl-item ${e.k}"><div class="tm">${e.t}</div><div class="tx">${e.tx}</div></div>`).join('')}
@@ -1217,6 +1291,72 @@ function buildAppTopo(app) {
   return { svg, edgeCount: edges.length };
 }
 
+/* 组件依赖编辑：列表 + 增删，改动同步到拓扑与组件卡片的上下游 */
+function closeTopModal() {
+  const masks = document.querySelectorAll('.modal-mask');
+  if (masks.length) masks[masks.length - 1].remove();
+}
+function editDeps(appId) {
+  const app = DB.apps.find(a => a.id === appId);
+  if (!app) return;
+  const comps = app.components.map(c => c.name);
+  if (comps.length < 2) return toast('至少需要两个组件才能声明依赖', 'warn');
+  const list = (DB.deps[appId] = DB.deps[appId] || []);
+  formModal({
+    title: `编辑依赖 · ${app.name}`,
+    desc: '声明组件间的同步调用或异步消息，拓扑与组件卡片上的上下游会同步更新。',
+    okText: '保存依赖',
+    wide: true,
+    body: `
+      <div class="dep-list">
+        ${list.length ? list.map(([a, b, label, kind], i) => `<div class="dep-row">
+          <span class="mono dep-n">${esc(a)}</span>
+          <span class="dep-arrow">→</span>
+          <span class="mono dep-n">${esc(b)}</span>
+          <span class="chip">${esc(label || '调用')}</span>
+          ${kind === 'async' ? '<span class="badge muted">异步</span>' : ''}
+          <button class="mini-act danger" title="删除该依赖" onclick="removeDep('${appId}',${i})">${icon('archive', '', 12)}</button>
+        </div>`).join('') : '<div class="tiny muted">还没有声明依赖，可在下方添加第一条</div>'}
+      </div>
+      <div class="divider"></div>
+      <div class="tiny muted" style="margin-bottom:8px">新增一条依赖</div>
+      <div class="form-row">
+        ${fField('上游组件', fSelect('from', comps, comps[0]))}
+        ${fField('下游组件', fSelect('to', comps, comps[1]))}
+      </div>
+      <div class="form-row">
+        ${fField('调用说明', fInput('label', '', '例如：HTTP · 1.2k rps'))}
+        ${fCheck('async', '异步 / 消息', false, '拓扑中以虚线表示')}
+      </div>`,
+    onSubmit: st => {
+      if (!st.from || !st.to) return null;
+      if (st.from === st.to) return '上下游不能是同一个组件';
+      if (list.some(([a, b]) => a === st.from && b === st.to)) return '这条依赖已存在';
+      list.push([st.from, st.to, st.label || '调用', st.async ? 'async' : 'sync']);
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: '', tx: `新增依赖 <b>${esc(st.from)} → ${esc(st.to)}</b>` });
+      saveSnapshot();
+      route();
+      toast('依赖已添加', 'ok');
+    }
+  });
+}
+function removeDep(appId, idx) {
+  const list = DB.deps[appId] || [];
+  const item = list[idx];
+  if (!item) return;
+  list.splice(idx, 1);
+  const app = DB.apps.find(a => a.id === appId);
+  if (app) {
+    app.updated = nowStamp();
+    app.events.unshift({ t: clockNow(), k: 'warn', tx: `删除依赖 <b>${esc(item[0])} → ${esc(item[1])}</b>` });
+  }
+  saveSnapshot();
+  closeTopModal();
+  route();
+  toast('依赖已删除', 'warn');
+}
+
 function appTopologyView(app) {
   if (!app.components.length) {
     return `<div class="empty">
@@ -1244,7 +1384,7 @@ function appTopologyView(app) {
       <div class="d">点击节点可下钻到该组件的工作负载</div>
       <div class="r">
         <span class="chip blue">声明式依赖</span>
-        <button class="btn sm" onclick="toast('编辑依赖关系（原型）')">编辑依赖</button>
+        <button class="btn sm" onclick="editDeps('${app.id}')">编辑依赖</button>
       </div>
     </div>
     <div class="card-body" style="padding:10px 12px 4px">${svg}</div>
@@ -1272,6 +1412,103 @@ function appTopologyView(app) {
 /* ==========================================================
    应用访问入口（独立域名 / 平台网关路径）
    ========================================================== */
+/* 访问入口：新增、启停、删除 */
+function newAccess(appId) {
+  const app = DB.apps.find(a => a.id === appId);
+  if (!app) return;
+  if (!app.components.length) return toast('该应用还没有组件，无法绑定后端', 'warn');
+  const comps = app.components.map(c => c.name);
+  const gw = DB.gateway;
+  formModal({
+    title: `新增访问入口 · ${app.name}`,
+    desc: '域名入口需把 CNAME 指到平台网关；网关路径入口由平台统一签发，无需自备域名。',
+    okText: '创建入口',
+    wide: true,
+    body: `
+      <div class="form-row">
+        ${fField('类型', fSelect('type', ['网关路径', '域名'], '网关路径'))}
+        ${fField('访问范围', fSelect('scope', ['公网', '内网'], '公网'))}
+      </div>
+      ${fField('域名或路径', fInput('host', '', `留空则用 ${gw.domain}/${app.id}/`), '域名填主机名；路径需以 / 开头')}
+      <div class="form-row">
+        ${fField('后端组件', fSelect('comp', comps, comps[0]))}
+        ${fField('端口', fInput('port', String(app.components[0].port || 8080), '8080', 'number'))}
+      </div>
+      <div class="form-row">
+        ${fField('TLS', fSelect('tls', ['平台泛域名', '已签发（自有证书）', '不启用'], '平台泛域名'))}
+        ${fField('认证', fSelect('auth', ['无', 'OAuth2 登录', 'API Key', 'JWT 校验'], '无'))}
+      </div>
+      ${fField('备注', fInput('note', '', '可选'))}`,
+    onSubmit: st => {
+      const host = String(st.host || '').trim();
+      let url;
+      if (st.type === '域名') {
+        if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(host)) return '请填写合法域名，例如 retail.corp.io';
+        url = `https://${host}`;
+      } else {
+        if (host && !host.startsWith('/')) return '网关路径需以 / 开头';
+        url = `https://${gw.domain}${host || '/' + app.id + '/'}`;
+      }
+      const port = clampInt(st.port, 1, 65535, 8080);
+      const target = app.components.find(c => c.name === st.comp);
+      if (!target) return '请选择后端组件';
+      const list = DB.access[app.id] || (DB.access[app.id] = []);
+      if (list.some(x => x.url === url)) return '该地址已存在，请换一个';
+      list.unshift({
+        env: curEnv().name, type: st.type, url, backend: `${target.name}:${port}`,
+        scope: st.scope, tls: st.tls === '不启用' ? '未启用' : st.tls,
+        auth: st.auth, status: '已生效', hits: '0 / 日', note: st.note || ''
+      });
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: 'ok', tx: `新增访问入口 <b>${esc(url)}</b> → ${esc(target.name)}:${port}` });
+      saveSnapshot();
+      route();
+      toast('访问入口已创建', 'ok');
+    }
+  });
+}
+function newAccessGlobal() {
+  if (!DB.apps.length) return toast('请先创建应用', 'warn');
+  formModal({
+    title: '新增访问入口',
+    desc: '入口归属于某个应用，先选择应用再填写地址。',
+    okText: '下一步',
+    body: fField('所属应用', fSelect('appId', DB.apps.map(a => [a.id, a.name]), DB.apps[0].id)),
+    onSubmit: st => {
+      const app = DB.apps.find(a => a.id === st.appId);
+      if (!app) return '请选择应用';
+      newAccess(app.id);
+    }
+  });
+}
+function toggleAccess(appId, url) {
+  const e = (DB.access[appId] || []).find(x => x.url === url);
+  if (!e) return;
+  e.status = e.status === '已生效' ? '已停用' : '已生效';
+  const app = DB.apps.find(a => a.id === appId);
+  if (app) app.events.unshift({ t: clockNow(), k: e.status === '已生效' ? 'ok' : 'warn', tx: `访问入口 <b>${esc(url)}</b> 已${e.status === '已生效' ? '启用' : '停用'}` });
+  saveSnapshot();
+  route();
+  toast(`入口已${e.status === '已生效' ? '启用' : '停用'}`, 'ok');
+}
+function deleteAccess(appId, url) {
+  openModal({
+    title: '删除访问入口',
+    desc: url,
+    danger: true,
+    okText: '确认删除',
+    body: `<p style="margin:0;font-size:12.5px;color:var(--text-2)">删除后该地址立即不可访问，正在调用的客户端会收到 404。此操作不可撤销。</p>`,
+    onOk: () => {
+      DB.access[appId] = (DB.access[appId] || []).filter(x => x.url !== url);
+      const app = DB.apps.find(a => a.id === appId);
+      if (app) app.events.unshift({ t: clockNow(), k: 'warn', tx: `访问入口 <b>${esc(url)}</b> 已删除` });
+      saveSnapshot();
+      route();
+      toast('访问入口已删除', 'warn');
+    }
+  });
+}
+
 function appAccessView(app) {
   const list = DB.access[app.id] || [];
   const gw = DB.gateway;
@@ -1285,7 +1522,7 @@ function appAccessView(app) {
       <div class="eic">${icon('globe', '', 22)}</div>
       <h3>尚未配置访问入口</h3>
       <p>可以为应用绑定独立域名，或直接挂到平台网关路径下，无需单独申请域名。</p>
-      <button class="btn primary" onclick="toast('新增访问入口（原型）')">新增入口</button>
+      <button class="btn primary" onclick="newAccess('${app.id}')">新增入口</button>
     </div>`;
   }
 
@@ -1310,7 +1547,7 @@ function appAccessView(app) {
       <div style="display:flex;gap:7px">
         <button class="btn" onclick="copyText('${esc(primary.url)}')">${icon('copy', '', 13)}复制</button>
         <button class="btn" onclick="openAccess('${app.id}','${esc(primary.url)}')">访问链路</button>
-        <button class="btn primary" onclick="toast('新增访问入口（原型）')">${icon('plus', '', 13)}新增入口</button>
+        <button class="btn primary" onclick="newAccess('${app.id}')">${icon('plus', '', 13)}新增入口</button>
       </div>
     </div>
   </div>` : ''}
@@ -1336,9 +1573,11 @@ function appAccessView(app) {
           ${e.note ? `<div class="tiny muted" style="margin-top:3px">${esc(e.note)}</div>` : ''}
         </div>
         <div style="flex:0 0 auto;margin-top:1px">${badge(e.status)}</div>
-        <div style="display:flex;gap:2px;flex:0 0 auto">
+        <div style="display:flex;gap:2px;flex:0 0 auto;align-items:center">
           <button class="btn sm ghost" onclick="copyText('${esc(e.url)}')">复制</button>
           <button class="btn sm ghost" onclick="openAccess('${app.id}','${esc(e.url)}')">链路</button>
+          <button class="btn sm ghost" onclick="toggleAccess('${app.id}','${esc(e.url)}')">${e.status === '已生效' ? '停用' : '启用'}</button>
+          <button class="mini-act danger" title="删除入口" onclick="deleteAccess('${app.id}','${esc(e.url)}')">${icon('archive', '', 13)}</button>
         </div>
       </div>`).join('')}
   </div>
@@ -1458,6 +1697,7 @@ function compFiltered() {
 }
 function viewComponents() {
   setCrumb('组件');
+  if (S.compApp !== 'all' && !DB.apps.some(a => a.id === S.compApp)) S.compApp = 'all';
   const all = compRows();
   const list = compFiltered();
   const badCount = all.filter(c => c.bad).length;
@@ -1590,7 +1830,7 @@ function viewAccessList() {
       <div class="sub">所有应用对外暴露的统一视图。支持<b>独立域名</b>与<b>平台网关路径</b>两种形态，鉴权、限流与证书统一在网关层处理。</div></div>
     <div class="acts">
       <button class="btn">证书管理</button>
-      <button class="btn primary" onclick="toast('新增访问入口（原型）')">${icon('plus', '', 14)}新增入口</button>
+      <button class="btn primary" onclick="newAccessGlobal()">${icon('plus', '', 14)}新增入口</button>
     </div>
   </div>
 
@@ -1682,7 +1922,7 @@ function viewWorkloads() {
         `<button class="filter-pill ${f === k ? 'on' : ''}" onclick="S.wlFilter='${k}';route()">${n}
          <span style="font-size:10px;color:var(--text-3)">${k === 'all' ? all.length : k === '异常' ? all.filter(w => w.status !== '运行中' && w.status !== '已完成').length : all.filter(w => w.where === k).length}</span>
         </button>`).join('')}
-      <div class="grow"><button class="btn sm">导出</button></div>
+      <div class="grow"><button class="btn sm" onclick="exportWorkloadsCsv()">${icon('archive', '', 12)}导出 CSV</button></div>
     </div>
     <div style="overflow-x:auto">
     <table class="table">
@@ -2849,6 +3089,8 @@ function releaseApp(appId, compName) {
     onSubmit: st => {
       if (!st.version) return '请填写发布版本';
       if (st.approval && !st.approver) return '请填写审批人，或关闭「需要人工审批」';
+      const target = app.components.find(c => c.name === st.comp);
+      if (!target || !target.workloads.length) return `组件「${st.comp}」还没有工作负载，发布不会产生任何变更`;
       const chosen = app.components.find(c => c.name === st.comp) || c0;
       const rec = {
         id: `rel-${Date.now().toString(36)}`,
@@ -3028,6 +3270,31 @@ function appReleasesView(app) {
 }
 
 /* ---------- 流水线列表 ---------- */
+/* 导出工作负载清单为 CSV（UTF-8 BOM，Excel 直接打开不乱码） */
+function csvCell(v) {
+  const t = String(v == null ? '' : v);
+  return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+}
+function downloadFile(name, text, mime) {
+  const blob = new Blob([text], { type: mime || 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+function exportWorkloadsCsv() {
+  const rows = DB.apps.flatMap(a => a.components.flatMap(c => c.workloads.map(w => ({ app: a.name, comp: c.name, w }))));
+  if (!rows.length) return toast('没有可导出的工作负载', 'warn');
+  const head = ['应用', '组件', '工作负载', '类型', '期望副本', '就绪副本', '状态', '调度位置', '集群', '镜像', 'CPU', '内存', '重启', '运行时长'];
+  const lines = [head.join(',')];
+  rows.forEach(({ app, comp, w }) => lines.push([
+    app, comp, w.name, w.kind, w.replicas, w.readyN, w.status, w.where, w.cluster, w.image, w.cpu, w.mem, w.restarts, w.age
+  ].map(csvCell).join(',')));
+  downloadFile(`workloads-${fmtDateTime(Date.now()).replace(/[: ]/g, '-')}.csv`, '\ufeff' + lines.join('\n'), 'text/csv;charset=utf-8');
+  toast(`已导出 ${rows.length} 个工作负载`, 'ok');
+}
+
 function viewCicd() {
   setCrumb('流水线');
   const total = DB.pipelines.length;
@@ -3036,7 +3303,7 @@ function viewCicd() {
     <div><div class="ttl">持续交付</div>
       <div class="sub">流水线绑定「应用 - 组件」，构建产物推送至制品仓库后按环境策略发布。</div></div>
     <div class="acts">
-      <button class="btn">模板</button>
+      <button class="btn" onclick="location.hash='/artifacts'">${icon('archive', '', 14)}制品仓库</button>
       <button class="btn primary" onclick="newPipeline()">${icon('plus', '', 14)}新建流水线</button>
     </div>
   </div>
@@ -3050,16 +3317,16 @@ function viewCicd() {
 
   <div class="card">
     <div class="toolbar">
-      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索流水线" /></div>
-      <button class="filter-pill on">全部</button>
-      <button class="filter-pill">运行中</button>
-      <button class="filter-pill">失败</button>
+      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索流水线 / 应用 / 组件" oninput="listFilter('#pipeTable', this.value)" /></div>
+      <button class="filter-pill on" onclick="listStatus('#pipeTable','all',this)">全部</button>
+      <button class="filter-pill" onclick="listStatus('#pipeTable','运行中',this)">运行中</button>
+      <button class="filter-pill" onclick="listStatus('#pipeTable','失败',this)">失败</button>
       <div class="grow"><span class="tiny muted" style="align-self:center">自动刷新 · 30s</span></div>
     </div>
-    <table class="table">
+    <table class="table" id="pipeTable">
       <thead><tr><th>流水线</th><th>应用 / 组件</th><th>触发</th><th>分支</th><th>最近运行</th><th>状态</th><th>成功率</th><th class="right">操作</th></tr></thead>
       <tbody>${DB.pipelines.map(p => `
-        <tr class="clickable" onclick="location.hash='/cicd/${p.id}'">
+        <tr class="clickable" data-q="${esc(p.name)} ${esc(p.app)} ${esc(p.comp)} ${esc(p.branch)}" data-status="${esc(p.status)}" onclick="location.hash='/cicd/${p.id}'">
           <td class="name">${esc(p.name)}</td>
           <td>${esc(p.app)}<div class="sub">${esc(p.comp)}</div></td>
           <td><span class="chip">${esc(p.trigger)}</span></td>
@@ -3067,7 +3334,7 @@ function viewCicd() {
           <td>${p.last}</td>
           <td>${pbadge(p.status)}</td>
           <td><div style="display:flex;align-items:center;gap:7px"><div class="progress thin" style="width:52px"><div class="${p.success > 95 ? 'ok' : 'warn'}" style="width:${p.success}%"></div></div><span class="num">${p.success}%</span></div></td>
-          <td class="right"><button class="btn sm" onclick="event.stopPropagation();toast('已触发运行')">运行</button></td>
+          <td class="right"><button class="btn sm" onclick="event.stopPropagation();rerunPipeline('${p.id}')">运行</button></td>
         </tr>`).join('')}</tbody>
     </table>
   </div>`;
@@ -3552,13 +3819,15 @@ function viewArtifacts() {
   </div>
   <div class="card">
     <div class="toolbar">
-      <div class="search" style="margin:0;width:240px">${icon('search', '', 14)}<input placeholder="搜索镜像" /></div>
-      <button class="filter-pill on">全部</button><button class="filter-pill">云端 amd64</button><button class="filter-pill">边缘 arm64</button>
+      <div class="search" style="margin:0;width:240px">${icon('search', '', 14)}<input placeholder="搜索镜像 / 版本" oninput="listFilter('#artTable', this.value)" /></div>
+      <button class="filter-pill on" onclick="listStatus('#artTable','all',this)">全部</button>
+      <button class="filter-pill" onclick="listStatus('#artTable','amd64',this)">云端 amd64</button>
+      <button class="filter-pill" onclick="listStatus('#artTable','arm64',this)">边缘 arm64</button>
     </div>
-    <table class="table">
+    <table class="table" id="artTable">
       <thead><tr><th>镜像</th><th>版本</th><th>大小</th><th>架构</th><th>扫描</th><th>推送人</th><th class="right">推送时间</th></tr></thead>
       <tbody>${arts.map(a => `
-        <tr>
+        <tr data-q="${esc(a.n)} ${esc(a.t)} ${esc(a.by)}" data-status="${esc(a.arch)}">
           <td class="name mono" style="font-size:11.5px">${a.n}</td>
           <td><span class="chip">${a.t}</span></td>
           <td class="num">${a.s}</td>
@@ -3608,14 +3877,15 @@ function viewMesh() {
   </div>
   <div class="card">
     <div class="toolbar">
-      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索服务" /></div>
-      <button class="filter-pill on">全部</button><button class="filter-pill">异常</button>
+      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索服务 / 命名空间" oninput="listFilter('#meshTable', this.value)" /></div>
+      <button class="filter-pill on" onclick="listStatus('#meshTable','all',this)">全部</button>
+      <button class="filter-pill" onclick="listStatus('#meshTable','告警',this)">异常</button>
       <div class="grow"><span class="tiny muted" style="align-self:center">控制面 istiod v1.21.3 · 数据面 Envoy 1.29</span></div>
     </div>
-    <table class="table">
+    <table class="table" id="meshTable">
       <thead><tr><th>服务</th><th>命名空间</th><th>版本</th><th>Sidecar</th><th>QPS</th><th>成功率</th><th>P99</th><th>实例</th><th>状态</th></tr></thead>
       <tbody>${DB.mesh.services.map(s => `
-        <tr class="clickable" onclick="openTraceBySvc('${esc(s.name)}')" title="查看该服务的链路">
+        <tr class="clickable" data-q="${esc(s.name)} ${esc(s.ns)} ${esc(s.ver)}" data-status="${esc(s.status)}" onclick="openTraceBySvc('${esc(s.name)}')" title="查看该服务的链路">
           <td class="name">${esc(s.name)}</td>
           <td class="mono" style="font-size:11px">${esc(s.ns)}</td>
           <td class="mono" style="font-size:11px">${esc(s.ver)}</td>
@@ -4084,14 +4354,16 @@ function viewEdgeNodes() {
   </div>
   <div class="card">
     <div class="toolbar">
-      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索节点 / 区域" /></div>
-      <button class="filter-pill on">全部</button><button class="filter-pill">在线</button><button class="filter-pill">离线</button>
+      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索节点 / 区域" oninput="listFilter('#nodeTable', this.value)" /></div>
+      <button class="filter-pill on" onclick="listStatus('#nodeTable','all',this)">全部</button>
+      <button class="filter-pill" onclick="listStatus('#nodeTable','在线',this)">在线</button>
+      <button class="filter-pill" onclick="listStatus('#nodeTable','离线',this)">离线</button>
       <div class="grow"><span class="tiny muted" style="align-self:center">节点版本 v1.8.2 统一</span></div>
     </div>
-    <table class="table">
+    <table class="table" id="nodeTable">
       <thead><tr><th>节点</th><th>位置</th><th>类型</th><th>CPU</th><th>内存</th><th>回源延迟</th><th>工作负载</th><th>最近同步</th><th>状态</th></tr></thead>
       <tbody>${DB.edge.nodes.map(n => `
-        <tr class="clickable" onclick="toast('节点详情 ${n.name}（原型）')">
+        <tr class="clickable" data-q="${esc(n.name)} ${esc(n.region)} ${esc(n.type)}" data-status="${esc(n.status)}" onclick="toast('节点详情 ${n.name}（原型）')">
           <td class="name mono" style="font-size:11.5px">${esc(n.name)}<div class="sub">${esc(n.ver)}</div></td>
           <td>${esc(n.region)}</td>
           <td><span class="chip">${esc(n.type)}</span></td>
@@ -4185,14 +4457,17 @@ function viewEdgeDevices() {
   </div>
   <div class="card">
     <div class="toolbar">
-      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索设备 ID" /></div>
-      <button class="filter-pill on">全部</button><button class="filter-pill">POS</button><button class="filter-pill">摄像头</button><button class="filter-pill">价签</button>
+      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索设备 ID / 节点" oninput="listFilter('#devTable', this.value)" /></div>
+      <button class="filter-pill on" onclick="listStatus('#devTable','all',this)">全部</button>
+      <button class="filter-pill" onclick="listStatus('#devTable','POS',this)">POS</button>
+      <button class="filter-pill" onclick="listStatus('#devTable','摄像头',this)">摄像头</button>
+      <button class="filter-pill" onclick="listStatus('#devTable','价签',this)">价签</button>
       <div class="grow"><span class="tiny muted" style="align-self:center">心跳周期 30s</span></div>
     </div>
-    <table class="table">
+    <table class="table" id="devTable">
       <thead><tr><th>设备 ID</th><th>类型</th><th>协议</th><th>所属边缘节点</th><th>固件</th><th>最近心跳</th><th>状态</th></tr></thead>
       <tbody>${DB.edge.devices.map(d => `
-        <tr class="clickable" onclick="toast('设备详情 ${d.id}（原型）')">
+        <tr class="clickable" data-q="${esc(d.id)} ${esc(d.type)} ${esc(d.node)}" data-status="${esc(d.type)}" onclick="toast('设备详情 ${d.id}（原型）')">
           <td class="name mono" style="font-size:11.5px">${esc(d.id)}</td>
           <td><span class="chip">${esc(d.type)}</span></td>
           <td><span class="badge outline">${esc(d.proto)}</span></td>
@@ -5002,17 +5277,23 @@ function deleteComponent(appId, compName) {
   const comp = app && app.components.find(c => c.name === compName);
   if (!comp) return;
   const wlCount = comp.workloads.length;
+  const boundPipes = DB.pipelines.filter(p => p.appId === appId && p.comp === compName);
   formModal({
     title: '删除组件？',
     desc: `${app.name} / ${compName}`,
     danger: true,
     okText: '删除组件',
     body: `<div class="danger-box">
-        该组件下辖 <b>${wlCount}</b> 个工作负载，将一并删除；绑定到该组件的流水线需要重新指定构建对象。
+        该组件下辖 <b>${wlCount}</b> 个工作负载${boundPipes.length ? `、<b>${boundPipes.length}</b> 条流水线` : ''}，以及它的发布记录与组件作用域配置，将一并删除。
       </div>
       ${app.components.length === 1 ? '<div class="warn-box" style="margin-top:10px">这是应用内最后一个组件，删除后应用将没有任何可部署单元。</div>' : ''}`,
     onSubmit: () => {
       app.components = app.components.filter(c => c.name !== compName);
+      DB.pipelines = DB.pipelines.filter(p => !(p.appId === appId && p.comp === compName));
+      app.pipelines = app.pipelines.filter(pid => DB.pipelines.some(p => p.id === pid));
+      DB.releases = DB.releases.filter(r => !(r.appId === appId && r.comp === compName));
+      if (DB.config[appId]) DB.config[appId] = DB.config[appId].filter(c => c.scope !== compName);
+      if (DB.deps[appId]) DB.deps[appId] = DB.deps[appId].filter(([a, b]) => a !== compName && b !== compName);
       app.updated = nowStamp();
       app.events.unshift({ t: clockNow(), k: 'warn', tx: `组件 <b>${esc(compName)}</b> 及其 ${wlCount} 个工作负载已删除` });
       saveSnapshot();
@@ -5041,6 +5322,9 @@ function deleteApp(app) {
       DB.apps = DB.apps.filter(a => a.id !== app.id);
       delete DB.access[app.id];
       delete DB.deps[app.id];
+      delete DB.config[app.id];
+      DB.pipelines = DB.pipelines.filter(p => p.appId !== app.id);
+      DB.releases = DB.releases.filter(r => r.appId !== app.id);
       saveSnapshot();
       S.appComp = null;
       S.appWl = null;
