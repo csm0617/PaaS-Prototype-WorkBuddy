@@ -1,0 +1,15 @@
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 临时产物 ----
+.shots/
+*.log
+*.bak
+_smoke.js
+
+# ---- 工具本地状态 ----
+# 工作区 agent 记忆与缓存；如需团队共享项目记忆，删掉下面这行
+.workbuddy/
+node_modules/
