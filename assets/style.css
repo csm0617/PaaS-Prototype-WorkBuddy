@@ -915,3 +915,16 @@ button { font-family: inherit; }
 .form-sec:first-child { margin-top: 0; padding-top: 0; border-top: none; }
 .dep-chips .chip.proto { background: #f1f4fa; color: var(--text-2); font-family: var(--mono); }
 .form-row.cols3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+/* 配置与版本历史 */
+.cfg-foot {
+  padding: 9px 16px; border-top: 1px solid var(--border);
+  background: var(--surface-2); font-size: 11.5px; color: var(--text-3);
+}
+.dep-chips .chip.ver { cursor: pointer; font-family: var(--mono); }
+.dep-chips .chip.ver:hover { background: var(--primary-soft); color: var(--primary); }
+.ver-list { display: flex; flex-direction: column; gap: 8px; }
+.ver-item { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; background: #fff; }
+.ver-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ver-tag { font-size: 12px; font-weight: 650; color: var(--text); }
+.ver-body { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }

@@ -5,6 +5,7 @@
 
 const DB = window.DB;
 DB.releases = DB.releases || [];
+DB.config = DB.config || {};
 const LS_KEY = 'paas.prototype.modules.v1';
 const LS_ENV = 'paas.prototype.env.v1';
 const LS_DB = 'paas.prototype.db.v1';
@@ -32,6 +33,10 @@ const S = {
   compQ: '',
   compApp: 'all',
   compFilter: 'all',
+  cfgQ: '',
+  cfgScope: 'all-app',
+  cfgType: 'all',
+  cfgShown: {},
   yamlDiff: false,
   logs: { key: '', lines: [], level: 'all', q: '', container: '', paused: false, pending: 0, follow: true },
   term: [],
@@ -51,6 +56,7 @@ function loadSnapshot() {
       if (d.access && typeof d.access === 'object') DB.access = d.access;
       if (Array.isArray(d.pipelines)) DB.pipelines = d.pipelines;
       if (Array.isArray(d.releases)) DB.releases = d.releases;
+      if (d.config && typeof d.config === 'object') DB.config = d.config;
     }
   } catch (e) { /* 快照损坏时退回 data.js 初始数据 */ }
 }
@@ -58,7 +64,7 @@ function saveSnapshot() {
   try {
     localStorage.setItem(LS_DB, JSON.stringify({
       v: 1, apps: DB.apps, access: DB.access,
-      pipelines: DB.pipelines, releases: DB.releases
+      pipelines: DB.pipelines, releases: DB.releases, config: DB.config
     }));
   } catch (e) { /* 存储不可用时降级为纯内存态 */ }
 }
@@ -947,9 +953,10 @@ function appTabBody(app) {
         <div class="card-head">
           <div>
             <div class="t">${esc(comp.name)} <span class="chip" style="margin-left:4px">${esc(comp.role)}</span></div>
-            <div class="d mono" style="margin-top:2px">${esc(comp.image)}:${esc(comp.version)} · ${runtimeText(comp)}</div>
+            <div class="d mono" style="margin-top:2px">${esc(comp.image)} · ${runtimeText(comp)}</div>
             <div class="dep-chips">
               <span class="chip svc" title="集群内服务名与端口">${esc(comp.serviceName || comp.name)}:${comp.port}</span>
+              <span class="chip ver" title="查看版本历史" onclick="componentVersions('${app.id}','${comp.name}')">${esc(comp.version)}</span>
               <span class="chip proto" title="对外协议">${esc(comp.protocol || 'HTTP')}</span>
               ${(() => {
                 const d = compDeps(app.id, comp.name);
@@ -1080,33 +1087,7 @@ function appTabBody(app) {
     </div>`;
   }
 
-  if (S.appTab === 'config') {
-    return `<div class="grid g2">
-      <div class="card" style="box-shadow:none">
-        <div class="card-head"><div class="t">配置项</div><div class="r"><button class="btn sm" onclick="toast('新增配置项（原型）')">${icon('plus', '', 12)}新增</button></div></div>
-        <table class="table">
-          <thead><tr><th>Key</th><th>Value</th><th>生效范围</th></tr></thead>
-          <tbody>
-            <tr><td class="name mono">ORDER_TIMEOUT_MS</td><td class="mono">800</td><td><span class="chip">全部组件</span></td></tr>
-            <tr><td class="name mono">INVENTORY_ENDPOINT</td><td class="mono">http://inventory-service:8080</td><td><span class="chip">order-service</span></td></tr>
-            <tr><td class="name mono">LOG_LEVEL</td><td class="mono">info</td><td><span class="chip">全部组件</span></td></tr>
-            <tr><td class="name mono">FEATURE_SPLIT_ORDER</td><td class="mono">true</td><td><span class="chip">order-service</span></td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="card" style="box-shadow:none">
-        <div class="card-head"><div class="t">密钥引用</div><div class="r tiny muted">仅引用，不落地明文</div></div>
-        <table class="table">
-          <thead><tr><th>名称</th><th>类型</th><th>值</th><th>更新</th></tr></thead>
-          <tbody>
-            <tr><td class="name">order-db-secret</td><td><span class="chip">Opaque</span></td><td class="mono">••••••••</td><td class="tiny muted">12 天前</td></tr>
-            <tr><td class="name">pay-sign-key</td><td><span class="chip">TLS</span></td><td class="mono">••••••••</td><td class="tiny muted">3 天前</td></tr>
-            <tr><td class="name">registry-pull</td><td><span class="chip">DockerCfg</span></td><td class="mono">••••••••</td><td class="tiny muted">30 天前</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>`;
-  }
+  if (S.appTab === 'config') return appConfigView(app);
 
   return `<div class="tl" style="max-width:760px">
     ${app.events.map(e => `<div class="tl-item ${e.k}"><div class="tm">${e.t}</div><div class="tx">${e.tx}</div></div>`).join('')}
@@ -1959,6 +1940,12 @@ function eventsFor(w, comp) {
 }
 
 /* ---------- YAML ---------- */
+/* 配置项 → 环境变量片段；密钥走 secretKeyRef */
+function cfgYamlEnv(cfg, ind) {
+  return (cfg || []).flatMap(c => c.secret
+    ? [`${ind}- name: ${c.key}`, `${ind}  valueFrom:`, `${ind}    secretKeyRef:`, `${ind}      name: app-secrets`, `${ind}      key: ${c.key}`]
+    : [`${ind}- name: ${c.key}`, `${ind}  value: "${c.value}"`]);
+}
 function yamlFor(app, comp, w) {
   if (w.kind === 'CronJob') return cronYaml(app, comp, w);
   const { cur: cpuCur, cap: cpuCap } = parseRes(w.cpu, 'cpu');
@@ -2017,6 +2004,7 @@ function yamlFor(app, comp, w) {
     '              value: prod',
     '            - name: OTEL_EXPORTER_OTLP_ENDPOINT',
     '              value: http://otel-collector.observability:4317',
+    ...cfgYamlEnv(configOf(app, comp.name), '            '),
     '          livenessProbe:',
     '            httpGet:',
     `              path: ${comp.healthPath}`,
@@ -2098,7 +2086,8 @@ function cronYaml(app, comp, w) {
     '                - name: APP_ENV',
     '                  value: prod',
     '                - name: JOB_DRY_RUN',
-    '                  value: "false"'
+    '                  value: "false"',
+    ...cfgYamlEnv(configOf(app, comp.name), '                ')
   ];
 }
 function yamlDrift(lines) {
@@ -2610,6 +2599,179 @@ function bindChart(el) {
 }
 
 /* ==========================================================
+   配置与密钥：应用级存储，作用域可落到组件
+   ========================================================== */
+function ensureConfig(app) {
+  if (!app) return [];
+  if (!DB.config[app.id]) {
+    const comps = app.components.map(c => c.name);
+    const seed = [
+      { key: 'LOG_LEVEL', value: 'info', scope: 'all', secret: false, note: '日志级别：debug / info / warn / error' },
+      { key: 'OTEL_SAMPLE_RATIO', value: '0.125', scope: 'all', secret: false, note: '链路采样率' },
+      { key: 'INTERNAL_API_TOKEN', value: 'tok_live_3a91c7', scope: 'all', secret: true, note: '内部服务间调用凭证' }
+    ];
+    if (comps.includes('order-service')) seed.push(
+      { key: 'ORDER_TIMEOUT_MS', value: '800', scope: 'order-service', secret: false, note: '下单主流程超时（毫秒）' },
+      { key: 'FEATURE_SPLIT_ORDER', value: 'true', scope: 'order-service', secret: false, note: '门店自提订单拆分开关' }
+    );
+    if (comps.includes('channel-adapter')) seed.push(
+      { key: 'PAY_SIGN_KEY', value: 'sk_live_9f3c7a2b', scope: 'channel-adapter', secret: true, note: '渠道签名密钥' }
+    );
+    DB.config[app.id] = seed.map((c, i) => Object.assign({ id: `cfg-${app.id}-${i}`, updated: app.updated || nowStamp() }, c));
+    saveSnapshot();
+  }
+  return DB.config[app.id];
+}
+/* 某个组件实际生效的配置：全局 + 组件作用域 */
+function configOf(app, compName) {
+  return ensureConfig(app).filter(c => c.scope === 'all' || c.scope === compName);
+}
+function cfgFiltered(app) {
+  const q = (S.cfgQ || '').trim().toLowerCase();
+  return ensureConfig(app).filter(c => {
+    if (S.cfgScope !== 'all-app' && c.scope !== S.cfgScope) return false;
+    if (S.cfgType === 'secret' && !c.secret) return false;
+    if (S.cfgType === 'plain' && c.secret) return false;
+    if (!q) return true;
+    return c.key.toLowerCase().includes(q) || String(c.value).toLowerCase().includes(q) || String(c.note || '').toLowerCase().includes(q);
+  });
+}
+function cfgRows(app) {
+  const list = cfgFiltered(app);
+  if (!list.length) {
+    return `<tr><td colspan="6"><div class="empty" style="padding:30px 16px"><h3>没有匹配的配置项</h3><p>换个作用域或类型，或者新增一条。</p></div></td></tr>`;
+  }
+  return list.map(c => `<tr>
+    <td class="name mono" style="font-size:11.5px">${esc(c.key)}${c.note ? `<div class="sub" style="font-weight:400">${esc(c.note)}</div>` : ''}</td>
+    <td class="mono" style="font-size:11px">
+      ${c.secret && !S.cfgShown[c.id]
+        ? `<span style="letter-spacing:2px;color:var(--text-3)">••••••••</span>
+           <button class="btn sm ghost" style="height:18px;padding:0 5px;margin-left:4px" onclick="cfgReveal('${app.id}','${c.id}')">显示</button>`
+        : esc(c.value)}
+    </td>
+    <td>${c.scope === 'all' ? '<span class="chip">全部组件</span>' : `<span class="chip blue">${esc(c.scope)}</span>`}</td>
+    <td>${c.secret ? '<span class="badge purple">密钥</span>' : '<span class="badge muted">明文</span>'}</td>
+    <td class="tiny muted">${esc(c.updated)}</td>
+    <td class="right">
+      <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
+        <button class="btn sm" onclick="cfgEdit('${app.id}','${c.id}')">编辑</button>
+        <button class="mini-act danger" title="删除" onclick="cfgDelete('${app.id}','${c.id}')">${icon('archive', '', 13)}</button>
+      </div>
+    </td>
+  </tr>`).join('');
+}
+function appConfigView(app) {
+  const list = ensureConfig(app);
+  const shown = cfgFiltered(app).length;
+  return `
+  <div class="card" style="box-shadow:none">
+    <div class="toolbar">
+      <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}
+        <input id="cfg-q" placeholder="Key / 值 / 说明" value="${esc(S.cfgQ)}" oninput="cfgSet('q', this.value)" />
+      </div>
+      <select class="input" style="width:170px;height:30px;padding:0 8px;font-size:12px" onchange="cfgSet('scope', this.value)">
+        <option value="all-app"${S.cfgScope === 'all-app' ? ' selected' : ''}>全部作用域</option>
+        <option value="all"${S.cfgScope === 'all' ? ' selected' : ''}>全部组件</option>
+        ${app.components.map(c => `<option value="${esc(c.name)}"${S.cfgScope === c.name ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}
+      </select>
+      ${[['all', '全部'], ['plain', '明文'], ['secret', '密钥']].map(([k, n]) =>
+        `<button class="filter-pill ${S.cfgType === k ? 'on' : ''}" onclick="cfgSet('type','${k}')">${n}</button>`).join('')}
+      <div class="grow">
+        <span class="tiny muted" style="align-self:center" id="cfg-count">${shown} / ${list.length} 项</span>
+        <button class="btn sm primary" onclick="cfgNew('${app.id}')">${icon('plus', '', 12)}新增配置</button>
+      </div>
+    </div>
+    <table class="table">
+      <thead><tr><th>Key</th><th>值</th><th>生效范围</th><th>类型</th><th>更新</th><th class="right">操作</th></tr></thead>
+      <tbody id="cfg-rows">${cfgRows(app)}</tbody>
+    </table>
+    <div class="cfg-foot">
+      配置项按作用域注入到工作负载的环境变量；密钥在下发时以 secretKeyRef 引用，不写进 Deployment 明文。
+    </div>
+  </div>`;
+}
+function cfgSet(k, v) {
+  S['cfg' + k[0].toUpperCase() + k.slice(1)] = v;
+  const appId = currentAppId();
+  const app = DB.apps.find(a => a.id === appId);
+  const rows = $('#cfg-rows');
+  if (app && rows) rows.innerHTML = cfgRows(app);
+  const cnt = $('#cfg-count');
+  if (app && cnt) cnt.textContent = `${cfgFiltered(app).length} / ${ensureConfig(app).length} 项`;
+  if (k === 'type') {
+    document.querySelectorAll('.filter-pill').forEach(el => el.classList.remove('on'));
+    const btn = [...document.querySelectorAll('.filter-pill')].find(b => b.textContent.trim() === ({ all: '全部', plain: '明文', secret: '密钥' })[v]);
+    if (btn) btn.classList.add('on');
+  }
+}
+function cfgReveal(appId, id) {
+  S.cfgShown[id] = !S.cfgShown[id];
+  const app = DB.apps.find(a => a.id === appId);
+  const rows = $('#cfg-rows');
+  if (app && rows) rows.innerHTML = cfgRows(app);
+}
+function cfgNew(appId) { cfgModal(appId, null); }
+function cfgEdit(appId, id) { cfgModal(appId, id); }
+function cfgModal(appId, id) {
+  const app = DB.apps.find(a => a.id === appId);
+  if (!app) return;
+  const list = ensureConfig(app);
+  const item = id ? list.find(c => c.id === id) : null;
+  const scopes = [['all', '全部组件'], ...app.components.map(c => [c.name, c.name])];
+  formModal({
+    title: item ? `编辑配置 · ${item.key}` : '新增配置项',
+    desc: 'Key 在同一作用域内唯一；密钥类型的值不会明文下发到工作负载。',
+    okText: item ? '保存' : '新增',
+    body: `
+      ${fField('Key', fInput('key', item ? item.key : '', 'ORDER_TIMEOUT_MS'), '大写字母、数字与下划线', true)}
+      ${fField('值', fInput('value', item ? item.value : '', item && item.secret ? '密钥值' : ''))}
+      <div class="form-row">
+        ${fField('生效范围', fSelect('scope', scopes, item ? item.scope : 'all'))}
+        ${fField('说明', fInput('note', item ? item.note || '' : '', '可选'))}
+      </div>
+      ${fCheck('secret', '作为密钥下发', item ? !!item.secret : false, '以 secretKeyRef 引用，不写进 Deployment 明文')}`,
+    onSubmit: st => {
+      if (!/^[A-Z][A-Z0-9_]*$/.test(st.key)) return 'Key 只能是大写字母、数字与下划线，并以字母开头';
+      if (!st.value) return '请填写配置值';
+      if (list.some(c => c.key === st.key && c.scope === st.scope && c.id !== id)) return `作用域 ${st.scope === 'all' ? '全部组件' : st.scope} 下已存在 ${st.key}`;
+      if (item) {
+        Object.assign(item, { key: st.key, value: st.value, scope: st.scope, secret: st.secret, note: st.note, updated: nowStamp() });
+      } else {
+        list.unshift({
+          id: `cfg-${appId}-${Date.now().toString(36)}`,
+          key: st.key, value: st.value, scope: st.scope, secret: st.secret, note: st.note, updated: nowStamp()
+        });
+      }
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: '', tx: `配置 <b>${esc(st.key)}</b> ${item ? '已更新' : '已新增'}（作用域 ${esc(st.scope === 'all' ? '全部组件' : st.scope)}）` });
+      saveSnapshot();
+      route();
+      toast(item ? '配置已保存' : '配置已新增', 'ok');
+    }
+  });
+}
+function cfgDelete(appId, id) {
+  const app = DB.apps.find(a => a.id === appId);
+  const item = app && ensureConfig(app).find(c => c.id === id);
+  if (!item) return;
+  openModal({
+    title: '删除配置项',
+    desc: `${item.key} · 作用域 ${item.scope === 'all' ? '全部组件' : item.scope}`,
+    danger: true,
+    okText: '确认删除',
+    body: `<p style="margin:0;font-size:12.5px;color:var(--text-2)">删除后，引用该配置的工作负载下次发布时将不再注入此环境变量。</p>`,
+    onOk: () => {
+      DB.config[appId] = ensureConfig(app).filter(c => c.id !== id);
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: 'warn', tx: `配置 <b>${esc(item.key)}</b> 已删除` });
+      saveSnapshot();
+      route();
+      toast('配置已删除', 'ok');
+    }
+  });
+}
+
+/* ==========================================================
    发布：申请 / 审批 / 回滚 / 记录
    ========================================================== */
 DB.releases = DB.releases || [];
@@ -2695,7 +2857,10 @@ function releaseApp(appId, compName) {
         env: st.env, strategy: st.strategy,
         status: st.approval ? '待审批' : '发布中',
         by: DB.user.name, approver: st.approval ? st.approver : '自动',
-        at: fmtDateTime(Date.now()), ts: Date.now(), note: st.note || ''
+        at: fmtDateTime(Date.now()), ts: Date.now(), note: st.note || '',
+        configSnapshot: configOf(app, st.comp).map(c => ({
+          key: c.key, scope: c.scope, secret: !!c.secret, value: c.secret ? '••••••' : c.value
+        }))
       };
       DB.releases.unshift(rec);
       app.events.unshift({
@@ -2784,6 +2949,49 @@ function rollbackRelease(id) {
       route();
       toast(`已回滚至 ${rec.prev}`, 'ok');
     }
+  });
+}
+
+function cfgSnapDiff(prev, cur) {
+  if (!cur) return null;
+  const key = c => `${c.scope}:${c.key}`;
+  if (!prev) return { total: cur.length, added: 0, changed: 0, removed: 0, first: true };
+  const m = new Map(prev.map(c => [key(c), c.value]));
+  let added = 0, changed = 0, removed = 0;
+  cur.forEach(c => { const k = key(c); if (!m.has(k)) added++; else if (m.get(k) !== c.value) changed++; });
+  prev.forEach(c => { if (!cur.some(x => key(x) === key(c))) removed++; });
+  return { total: cur.length, added, changed, removed };
+}
+function componentVersions(appId, compName) {
+  const app = DB.apps.find(a => a.id === appId);
+  const comp = app && app.components.find(c => c.name === compName);
+  if (!comp) return;
+  const list = DB.releases.filter(r => r.appId === appId && r.comp === compName)
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  formModal({
+    title: `版本历史 · ${compName}`,
+    desc: '每次发布对应一个版本；带配置快照的可与上一版对比变更数。',
+    okText: '关闭',
+    hideCancel: true,
+    wide: true,
+    body: list.length ? `<div class="ver-list">${list.map((r, i) => {
+      const d = cfgSnapDiff(list[i + 1] && list[i + 1].configSnapshot, r.configSnapshot);
+      const delta = d && !d.first && (d.added || d.changed || d.removed);
+      return `<div class="ver-item">
+        <div class="ver-h">
+          <span class="ver-tag mono">${esc(r.version)}</span>
+          ${relBadge(r.status)}
+          <span class="tiny muted">${esc(r.env)} · ${esc(r.at)} · ${esc(r.by)}</span>
+        </div>
+        <div class="ver-body">
+          <span class="tiny muted">${esc(r.strategy)}</span>
+          ${r.note ? `<span class="tiny muted">· ${esc(r.note)}</span>` : ''}
+          ${d
+            ? `<span class="chip" style="font-size:10px">配置 ${d.total} 项${d.first ? '（首个快照）' : delta ? `（+${d.added} ~${d.changed} -${d.removed}）` : ' · 与上一版一致'}</span>`
+            : '<span class="tiny muted">· 该版本无配置快照</span>'}
+        </div>
+      </div>`;
+    }).join('')}</div>` : `<div class="empty" style="padding:26px"><p style="margin:0">该组件还没有发布记录</p></div>`
   });
 }
 
@@ -3158,7 +3366,10 @@ function promoteCanary(id) {
       version: comp ? comp.version : 'v1.0.0', prev: bumpVersion(comp ? comp.version : 'v1.0.0', -1),
       env: p.env, strategy: '灰度 10% → 50% → 100%', status: '已发布',
       by: DB.user.name, approver: app.owner || DB.user.name,
-      at: fmtDateTime(Date.now()), ts: Date.now(), note: `流水线 ${p.name} #${p.runs}`
+      at: fmtDateTime(Date.now()), ts: Date.now(), note: `流水线 ${p.name} #${p.runs}`,
+      configSnapshot: configOf(app, p.comp).map(c => ({
+        key: c.key, scope: c.scope, secret: !!c.secret, value: c.secret ? '••••••' : c.value
+      }))
     });
   }
   saveSnapshot();
