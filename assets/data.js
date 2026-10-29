@@ -503,6 +503,180 @@ window.DB = {
       { name: 'pay-router-circuit', type: '目标规则', host: 'pay-router', match: '所有请求', action: '熔断：连续 5 次 5xx → 隔离 30s', status: '生效中' },
       { name: 'channel-adapter-outlier', type: '目标规则', host: 'channel-adapter', match: '所有请求', action: '异常点驱逐 / 最大 50%', status: '生效中' },
       { name: 'inventory-mirror', type: '虚拟服务', host: 'inventory-service', match: '10% 采样', action: '流量镜像 → inventory-shadow', status: '已停用' }
+    ],
+
+    /* 链路追踪：Sidecar 上报的 OTel Span。
+       start / dur 单位 ms，start 为相对链路起点的偏移；p 为父 span 下标（缺省为根）。
+       kind: server | client | producer | consumer | db */
+    traces: [
+      {
+        id: '4bf29a1c8e7d4f03',
+        root: 'POST /api/order/submit',
+        at: '20:41:12',
+        dur: 1420,
+        status: '慢调用',
+        spans: [
+          { svc: 'api-gateway', name: 'ingress', kind: 'server', start: 0, dur: 1420, status: 'ok', pod: 'api-gateway-7d9f2-xk4n',
+            tags: { 'http.method': 'POST', 'http.target': '/api/order/submit', 'http.status_code': '200', 'upstream_cluster': 'outbound|8080||order-service' }, events: [] },
+          { svc: 'order-service', name: 'submit', kind: 'server', start: 3, dur: 1411, status: 'ok', pod: 'order-service-api-5b6c8d-9f2l', p: 0,
+            tags: { 'http.status_code': '200', 'user.id': 'u_88213', 'order.channel': 'APP' }, events: [] },
+          { svc: 'auth-service', name: 'POST /v1/token/verify', kind: 'client', start: 8, dur: 32, status: 'ok', pod: 'order-service-api-5b6c8d-9f2l', p: 1,
+            tags: { 'peer.service': 'auth-service', 'net.peer.ip': '10.24.7.19:8080', 'rpc.status': 'OK' }, events: [] },
+          { svc: 'inventory-service', name: 'POST /v1/stock/deduct', kind: 'client', start: 48, dur: 162, status: 'ok', pod: 'order-service-api-5b6c8d-9f2l', p: 1,
+            tags: { 'peer.service': 'inventory-service', 'http.status_code': '200', 'retry.count': '0' }, events: [] },
+          { svc: 'order-db', name: 'UPDATE stock', kind: 'db', start: 62, dur: 128, status: 'ok', pod: 'inventory-api-6f7d9b-2mq8', p: 3,
+            tags: { 'db.system': 'mysql', 'db.name': 'retail', 'db.statement': 'UPDATE stock SET qty = qty - ? WHERE sku = ? AND qty >= ?', 'db.rows': '1' }, events: [] },
+          { svc: 'pay-router', name: 'POST /v1/pay/charge', kind: 'client', start: 218, dur: 1177, status: 'ok', pod: 'order-service-api-5b6c8d-9f2l', p: 1,
+            tags: { 'peer.service': 'pay-router', 'http.status_code': '200', 'amount': 'CNY 428.00' }, events: [] },
+          { svc: 'channel-adapter', name: 'forward', kind: 'server', start: 232, dur: 1158, status: 'ok', pod: 'channel-adapter-58c9f-7zbq', p: 5,
+            tags: { 'channel': 'cmb', 'http.status_code': '200', 'upstream.timeout': '1500ms' }, events: [
+              { t: '+0ms', tx: '选择渠道 cmb · 权重 60%' },
+              { t: '+12ms', tx: '发起上游请求' },
+              { t: '+620ms', tx: '上游响应缓慢，触发重试判定' }
+            ] },
+          { svc: 'bank-gateway', name: 'POST /gateway/pay', kind: 'client', start: 246, dur: 1122, status: 'ok', pod: 'channel-adapter-58c9f-7zbq', p: 6,
+            tags: { 'peer.service': 'bank-gateway', 'net.peer.ip': '203.0.113.28:443', 'http.status_code': '200', 'tls.version': 'TLSv1.3' }, events: [
+              { t: '+0ms', tx: 'connect 203.0.113.28:443' },
+              { t: '+310ms', tx: 'TLS 握手完成' },
+              { t: '+1096ms', tx: '收到响应 200 · 耗时超出 P99 阈值 12 倍' }
+            ] },
+          { svc: 'order-db', name: 'INSERT order_item', kind: 'db', start: 1398, dur: 16, status: 'ok', pod: 'order-service-api-5b6c8d-9f2l', p: 1,
+            tags: { 'db.system': 'mysql', 'db.name': 'retail', 'db.statement': 'INSERT INTO order_item (order_id, sku, qty) VALUES (?, ?, ?)', 'db.rows': '3' }, events: [] },
+          { svc: 'mqtt-broker', name: 'publish order.created', kind: 'producer', start: 1402, dur: 12, status: 'ok', pod: 'order-service-worker-6d4b7-8xr2', p: 1,
+            tags: { 'messaging.system': 'kafka', 'messaging.destination': 'order.created', 'messaging.partition': '3' }, events: [] }
+        ]
+      },
+      {
+        id: '9d0c2b7a4e51f8c6',
+        root: 'GET /api/product/detail',
+        at: '20:41:09',
+        dur: 38,
+        status: '正常',
+        spans: [
+          { svc: 'api-gateway', name: 'ingress', kind: 'server', start: 0, dur: 38, status: 'ok', pod: 'api-gateway-7d9f2-xk4n',
+            tags: { 'http.method': 'GET', 'http.target': '/api/product/detail?sku=SKU20481', 'http.status_code': '200' }, events: [] },
+          { svc: 'inventory-service', name: 'GET /v1/stock', kind: 'server', start: 4, dur: 32, status: 'ok', pod: 'inventory-api-6f7d9b-2mq8', p: 0,
+            tags: { 'http.status_code': '200', 'cache.hit': 'false' }, events: [] },
+          { svc: 'order-db', name: 'SELECT stock', kind: 'db', start: 8, dur: 21, status: 'ok', pod: 'inventory-api-6f7d9b-2mq8', p: 1,
+            tags: { 'db.system': 'mysql', 'db.statement': 'SELECT sku, qty, reserved FROM stock WHERE sku = ?', 'db.rows': '1' }, events: [] },
+          { svc: 'inventory-service', name: 'SET cache', kind: 'client', start: 30, dur: 3, status: 'ok', pod: 'inventory-api-6f7d9b-2mq8', p: 1,
+            tags: { 'peer.service': 'redis-cache', 'cache.ttl': '60s' }, events: [] }
+        ]
+      },
+      {
+        id: '1e7a54c9b03d2f88',
+        root: 'POST /api/pay/callback',
+        at: '20:40:58',
+        dur: 216,
+        status: '错误',
+        spans: [
+          { svc: 'api-gateway', name: 'ingress', kind: 'server', start: 0, dur: 216, status: 'err', pod: 'api-gateway-7d9f2-xk4n',
+            tags: { 'http.method': 'POST', 'http.target': '/api/pay/callback', 'http.status_code': '502', 'error': 'true' }, events: [] },
+          { svc: 'pay-router', name: 'POST /v1/pay/callback', kind: 'server', start: 3, dur: 210, status: 'err', pod: 'pay-router-6b8f4c-c7xm', p: 0,
+            tags: { 'http.status_code': '502', 'error.kind': 'upstream_reset', 'channel': 'cmb' }, events: [
+              { t: '+0ms', tx: '验签通过 · 订单 ord_20261029_8813' },
+              { t: '+6ms', tx: '转发至 channel-adapter' }
+            ] },
+          { svc: 'channel-adapter', name: 'forward', kind: 'client', start: 12, dur: 196, status: 'err', pod: 'channel-adapter-58c9f-7zbq', p: 1,
+            tags: { 'http.status_code': '502', 'upstream': 'bank-gateway', 'breaker.state': 'half-open' }, events: [
+              { t: '+4ms', tx: '上游连接被重置（connection reset by peer）' },
+              { t: '+8ms', tx: '熔断器统计 12/50 失败，进入 half-open 探测' }
+            ] },
+          { svc: 'bank-gateway', name: 'POST /gateway/callback', kind: 'client', start: 18, dur: 180, status: 'err', pod: 'channel-adapter-58c9f-7zbq', p: 2,
+            tags: { 'peer.service': 'bank-gateway', 'net.peer.ip': '203.0.113.28:443', 'http.status_code': '502', 'error': 'true' }, events: [
+              { t: '+0ms', tx: '连接复用失败，重新建连' },
+              { t: '+176ms', tx: '返回 502 Bad Gateway' }
+            ] }
+        ]
+      },
+      {
+        id: 'e3d8b2c4709a1f56',
+        root: 'GET /api/stock/realtime',
+        at: '20:40:41',
+        dur: 3020,
+        status: '超时',
+        spans: [
+          { svc: 'api-gateway', name: 'ingress', kind: 'server', start: 0, dur: 3020, status: 'err', pod: 'api-gateway-7d9f2-9twq',
+            tags: { 'http.method': 'GET', 'http.target': '/api/stock/realtime?store=edge-sh-007', 'http.status_code': '504', 'error': 'true' }, events: [] },
+          { svc: 'inventory-service', name: 'GET /v1/stock/realtime', kind: 'server', start: 3, dur: 3010, status: 'err', pod: 'inventory-api-6f7d9b-2mq8', p: 0,
+            tags: { 'http.status_code': '504', 'timeout': '3000ms', 'edge.node': 'edge-sh-007' }, events: [
+              { t: '+0ms', tx: '查询边缘节点实时库存' }
+            ] },
+          { svc: 'mqtt-broker', name: 'request stock.snapshot', kind: 'client', start: 10, dur: 2990, status: 'err', pod: 'inventory-api-6f7d9b-2mq8', p: 1,
+            tags: { 'messaging.system': 'mqtt', 'messaging.destination': 'stock/snapshot/edge-sh-007', 'qos': '1', 'error.kind': 'deadline_exceeded' }, events: [
+              { t: '+0ms', tx: 'PUBLISH qos=1 等待 PUBACK' },
+              { t: '+2988ms', tx: 'context deadline exceeded（3s）' }
+            ] }
+        ]
+      },
+      {
+        id: '2b8e6d1f45a7c093',
+        root: 'POST /api/inventory/sync',
+        at: '20:39:55',
+        dur: 862,
+        status: '慢调用',
+        spans: [
+          { svc: 'api-gateway', name: 'ingress', kind: 'server', start: 0, dur: 862, status: 'ok', pod: 'api-gateway-7d9f2-xk4n',
+            tags: { 'http.method': 'POST', 'http.target': '/api/inventory/sync', 'http.status_code': '200', 'client': 'edge-sync' }, events: [] },
+          { svc: 'inventory-service', name: 'POST /v1/stock/batch', kind: 'server', start: 2, dur: 858, status: 'ok', pod: 'inventory-api-6f7d9b-2mq8', p: 0,
+            tags: { 'http.status_code': '200', 'batch.size': '1280' }, events: [] },
+          { svc: 'order-db', name: 'INSERT ... ON DUPLICATE KEY', kind: 'db', start: 396, dur: 452, status: 'ok', pod: 'inventory-api-6f7d9b-2mq8', p: 1,
+            tags: { 'db.system': 'mysql', 'db.statement': 'INSERT INTO stock (sku, qty) VALUES ? ON DUPLICATE KEY UPDATE qty = VALUES(qty)', 'db.rows': '1280' }, events: [
+              { t: '+0ms', tx: '批量写入 1280 行' },
+              { t: '+448ms', tx: '锁等待累计 380ms，建议拆分批次' }
+            ] },
+          { svc: 'mqtt-broker', name: 'publish stock.updated', kind: 'producer', start: 852, dur: 8, status: 'ok', pod: 'inventory-api-6f7d9b-2mq8', p: 1,
+            tags: { 'messaging.system': 'kafka', 'messaging.destination': 'stock.updated' }, events: [] }
+        ]
+      },
+      {
+        id: '7c33f0ab91d6e542',
+        root: 'GET /api/user/profile',
+        at: '20:41:14',
+        dur: 22,
+        status: '正常',
+        spans: [
+          { svc: 'api-gateway', name: 'ingress', kind: 'server', start: 0, dur: 22, status: 'ok', pod: 'api-gateway-7d9f2-xk4n',
+            tags: { 'http.method': 'GET', 'http.target': '/api/user/profile', 'http.status_code': '200' }, events: [] },
+          { svc: 'profile-service', name: 'GET /v1/profile', kind: 'server', start: 3, dur: 18, status: 'ok', pod: 'profile-service-7c5d8-4hqp', p: 0,
+            tags: { 'http.status_code': '200', 'cache.hit': 'true' }, events: [] },
+          { svc: 'auth-service', name: 'POST /v1/token/verify', kind: 'client', start: 6, dur: 9, status: 'ok', pod: 'profile-service-7c5d8-4hqp', p: 1,
+            tags: { 'peer.service': 'auth-service', 'rpc.status': 'OK', 'token.ttl': '1840s' }, events: [] }
+        ]
+      },
+      {
+        id: '5a91c6e0f2b7d348',
+        root: 'POST /api/cart/add',
+        at: '20:41:16',
+        dur: 54,
+        status: '正常',
+        spans: [
+          { svc: 'api-gateway', name: 'ingress', kind: 'server', start: 0, dur: 54, status: 'ok', pod: 'api-gateway-7d9f2-9twq',
+            tags: { 'http.method': 'POST', 'http.target': '/api/cart/add', 'http.status_code': '200' }, events: [] },
+          { svc: 'order-service', name: 'add_to_cart', kind: 'server', start: 3, dur: 49, status: 'ok', pod: 'order-service-api-5b6c8d-w3pk', p: 0,
+            tags: { 'http.status_code': '200', 'cart.size': '4' }, events: [] },
+          { svc: 'order-db', name: 'INSERT cart_item', kind: 'db', start: 12, dur: 26, status: 'ok', pod: 'order-service-api-5b6c8d-w3pk', p: 1,
+            tags: { 'db.system': 'mysql', 'db.statement': 'INSERT INTO cart_item (user_id, sku, qty) VALUES (?, ?, ?)', 'db.rows': '1' }, events: [] },
+          { svc: 'mqtt-broker', name: 'publish cart.updated', kind: 'producer', start: 44, dur: 6, status: 'ok', pod: 'order-service-worker-6d4b7-8xr2', p: 1,
+            tags: { 'messaging.system': 'kafka', 'messaging.destination': 'cart.updated' }, events: [] }
+        ]
+      },
+      {
+        id: 'c04f9e37d81b2a65',
+        root: 'POST /api/device/heartbeat',
+        at: '20:41:02',
+        dur: 92,
+        status: '错误',
+        spans: [
+          { svc: 'api-gateway', name: 'ingress', kind: 'server', start: 0, dur: 92, status: 'err', pod: 'api-gateway-7d9f2-9twq',
+            tags: { 'http.method': 'POST', 'http.target': '/api/device/heartbeat', 'http.status_code': '503', 'error': 'true' }, events: [] },
+          { svc: 'mqtt-broker', name: 'POST /v1/session/touch', kind: 'server', start: 3, dur: 87, status: 'err', pod: 'mqtt-broker-5f9c7b-q2vn', p: 0,
+            tags: { 'http.status_code': '503', 'error.kind': 'broker_overloaded', 'connections': '8241 / 8000' }, events: [
+              { t: '+0ms', tx: '设备 dev-20481 心跳上报' },
+              { t: '+84ms', tx: '连接数超过上限（8241/8000），拒绝新会话' }
+            ] }
+        ]
+      }
     ]
   },
 

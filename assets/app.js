@@ -15,7 +15,13 @@ const S = {
   appComp: null,
   appWl: null,
   wlFilter: 'all',
-  pipelineTab: 'overview'
+  pipelineTab: 'overview',
+  traceQ: '',
+  traceSvc: 'all',
+  traceSt: 'all',
+  traceSel: '',
+  traceSpan: 0,
+  traceRange: '1h'
 };
 
 /* ---------------- 演示数据快照 ----------------
@@ -85,7 +91,8 @@ const STK = {
   '告警': 'warn', '降级': 'warn', '维护中': 'warn', '处理中': 'warn',
   '待调度': 'muted', '待执行': 'muted', '已停用': 'muted', '已忽略': 'muted', '跳过': 'muted', '未启用': 'muted',
   '未处理': 'bad', '失败': 'bad', '离线': 'bad', '已停止': 'bad', '严重': 'bad',
-  '警告': 'warn', '提示': 'muted', 'P0': 'bad', 'P1': 'warn', 'P2': 'muted'
+  '警告': 'warn', '提示': 'muted', 'P0': 'bad', 'P1': 'warn', 'P2': 'muted',
+  '正常': 'ok', '慢调用': 'warn', '错误': 'bad', '超时': 'bad'
 };
 function badge(t, k) { return `<span class="badge ${k || STK[t] || 'muted'}">${t === '运行中' || t === '健康' || t === '在线' ? '<i></i>' : ''}${esc(t)}</span>`; }
 function pbadge(t) {
@@ -117,6 +124,7 @@ const ICONS = {
   globe: '<circle cx="8" cy="8" r="6.2"/><path d="M1.8 8h12.4"/><path d="M8 1.8c1.8 1.8 2.8 3.9 2.8 6.2S9.8 12.4 8 14.2c-1.8-1.8-2.8-3.9-2.8-6.2S6.2 3.6 8 1.8z"/>',
   copy: '<rect x="5.4" y="5.4" width="8.2" height="8.2" rx="1.4"/><path d="M10.6 5.4V3.6c0-.7-.6-1.2-1.2-1.2H3.6c-.7 0-1.2.6-1.2 1.2v5.8c0 .7.6 1.2 1.2 1.2h1.8"/>',
   topo2: '<rect x="1.8" y="6" width="4.4" height="4" rx="1.2"/><rect x="9.8" y="1.8" width="4.4" height="4" rx="1.2"/><rect x="9.8" y="10.2" width="4.4" height="4" rx="1.2"/><path d="M6.2 8h1.6c.6 0 1-.4 1-1V5.8c0-.5.4-.9.9-.9h.1"/><path d="M6.2 8h1.6c.6 0 1 .4 1 1v1.2c0 .5.4.9.9.9h.1"/>',
+  trace: '<circle cx="3.4" cy="3.4" r="1.5"/><path d="M6.1 3.4h7.5"/><circle cx="3.4" cy="8" r="1.5"/><path d="M6.1 8h5.2"/><circle cx="3.4" cy="12.6" r="1.5"/><path d="M6.1 12.6h8.1"/>',
   refresh: '<path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8"/><path d="M13.6 2.4v3.4h-3.4"/>',
   plus: '<path d="M8 3.4v9.2M3.4 8h9.2"/>',
   chev: '<path d="M6 4l4 4-4 4"/>'
@@ -145,7 +153,8 @@ const NAV = [
     label: 'Service Mesh', module: 'mesh', mini: '模块', items: [
       { label: '服务治理', icon: 'share', route: '/mesh' },
       { label: '流量规则', icon: 'git', route: '/mesh/traffic' },
-      { label: '服务拓扑', icon: 'topo', route: '/mesh/topology' }
+      { label: '服务拓扑', icon: 'topo', route: '/mesh/topology' },
+      { label: '链路追踪', icon: 'trace', route: '/mesh/tracing' }
     ]
   },
   {
@@ -429,7 +438,7 @@ function fCheck(k, title, checked, hint = '', toggleId = '') {
 /* ---------------- 模块开关 ---------------- */
 function toggleModule(key, on) {
   const meta = {
-    mesh: { name: 'Service Mesh', off: '服务治理、流量规则、服务拓扑、Sidecar 注入与 mTLS 将不可用；应用发布仍按原生 Service 负载均衡执行。' },
+    mesh: { name: 'Service Mesh', off: '服务治理、流量规则、服务拓扑、链路追踪、Sidecar 注入与 mTLS 将不可用；应用发布仍按原生 Service 负载均衡执行。' },
     edge: { name: '云边端协同', off: '边缘节点纳管、边缘应用分发、端设备管理将不可用；边缘类工作负载会保留在云端调度，断网自治能力关闭。' }
   }[key];
   const apply = () => {
@@ -1667,7 +1676,7 @@ function viewArtifacts() {
 
 /* ---------- Service Mesh ---------- */
 function meshTabs(active) {
-  const t = [['/mesh', '服务治理'], ['/mesh/traffic', '流量规则'], ['/mesh/topology', '服务拓扑']];
+  const t = [['/mesh', '服务治理'], ['/mesh/traffic', '流量规则'], ['/mesh/topology', '服务拓扑'], ['/mesh/tracing', '链路追踪']];
   return `<div class="tabs" style="margin-bottom:14px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:0 8px">
     ${t.map(([r, n]) => `<div class="tab ${active === r ? 'on' : ''}" onclick="location.hash='${r}'">${n}</div>`).join('')}
   </div>`;
@@ -1709,7 +1718,7 @@ function viewMesh() {
     <table class="table">
       <thead><tr><th>服务</th><th>命名空间</th><th>版本</th><th>Sidecar</th><th>QPS</th><th>成功率</th><th>P99</th><th>实例</th><th>状态</th></tr></thead>
       <tbody>${DB.mesh.services.map(s => `
-        <tr>
+        <tr class="clickable" onclick="openTraceBySvc('${esc(s.name)}')" title="查看该服务的链路">
           <td class="name">${esc(s.name)}</td>
           <td class="mono" style="font-size:11px">${esc(s.ns)}</td>
           <td class="mono" style="font-size:11px">${esc(s.ver)}</td>
@@ -1828,7 +1837,9 @@ function viewMeshTopology() {
   });
 
   Object.values(N).forEach(n => {
-    svg += `<g>
+    const clickable = n.k === 'svc' || n.k === 'ext';
+    svg += `<g class="topo-node"${clickable ? ` style="cursor:pointer" onclick="openTraceBySvc('${n.n}')"` : ''}>
+      <title>${n.n}${clickable ? ' · 查看链路' : ''}</title>
       <rect x="${n.x}" y="${n.y}" width="${W}" height="${H}" rx="9" fill="${col[n.k]}" stroke="${str[n.k]}" stroke-width="1.2"/>
       <circle cx="${n.x + 14}" cy="${n.y + 15}" r="3.4" fill="${tc[n.k]}"/>
       <text x="${n.x + 25}" y="${n.y + 19}" font-size="11.5" font-weight="600" fill="#0e1729" font-family="ui-sans-serif,system-ui">${n.n}</text>
@@ -1842,6 +1853,7 @@ function viewMeshTopology() {
     <div><div class="ttl">服务拓扑</div><div class="sub">基于 Sidecar 东西向流量自动发现，虚线表示异步或跨层调用。</div></div>
     <div class="acts">
       <div class="seg"><button class="on">1 小时</button><button>6 小时</button><button>24 小时</button></div>
+      <button class="btn" onclick="openTraceBySvc('all')">${icon('trace', '', 14)}链路追踪</button>
     </div>
   </div>
   ${meshBanner()}
@@ -1859,6 +1871,282 @@ function viewMeshTopology() {
       </div>
     </div>
   </div>`;
+}
+
+/* ---------- 链路追踪 ---------- */
+const SVC_PALETTE = ['#2563eb', '#0d9488', '#7c3aed', '#0891b2', '#4f46e5', '#c2760a', '#b91c3c', '#0f766e', '#64748b', '#be185d'];
+const SVC_FIXED = {
+  'api-gateway': '#7c3aed', 'order-service': '#2563eb', 'auth-service': '#0d9488',
+  'inventory-service': '#0891b2', 'pay-router': '#4f46e5', 'channel-adapter': '#c2760a',
+  'order-db': '#64748b', 'mqtt-broker': '#0f766e', 'bank-gateway': '#b91c3c',
+  'profile-service': '#be185d'
+};
+function svcColor(s) {
+  if (SVC_FIXED[s]) return SVC_FIXED[s];
+  let h = 0;
+  for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return SVC_PALETTE[h % SVC_PALETTE.length];
+}
+function fmtMs(ms) { return ms >= 1000 ? (ms / 1000).toFixed(2) + 's' : ms + 'ms'; }
+function spanDepth(spans, i) {
+  let d = 0, p = spans[i].p;
+  while (p != null && p >= 0 && p < spans.length && d < 24) { d++; p = spans[p].p; }
+  return d;
+}
+function traceServices() {
+  const set = new Set();
+  (DB.mesh.traces || []).forEach(t => t.spans.forEach(s => set.add(s.svc)));
+  return [...set].sort();
+}
+function traceFiltered() {
+  const q = (S.traceQ || '').trim().toLowerCase();
+  return (DB.mesh.traces || []).filter(t => {
+    if (S.traceSvc !== 'all' && !t.spans.some(s => s.svc === S.traceSvc)) return false;
+    if (S.traceSt !== 'all' && t.status !== S.traceSt) return false;
+    if (!q) return true;
+    return t.id.includes(q) || t.root.toLowerCase().includes(q) ||
+      t.spans.some(s => s.svc.toLowerCase().includes(q) || s.name.toLowerCase().includes(q));
+  });
+}
+
+function viewMeshTracing() {
+  setCrumb('链路追踪');
+  if (!S.modules.mesh) return moduleOffPage('mesh', 'Service Mesh', '链路追踪依赖 Sidecar 上报的调用链数据。');
+  const list = traceFiltered();
+  if (!S.traceSel || !list.some(t => t.id === S.traceSel)) {
+    S.traceSel = list.length ? list[0].id : '';
+    S.traceSpan = 0;
+  }
+  const errCount = (DB.mesh.traces || []).filter(t => t.status === '错误' || t.status === '超时').length;
+
+  return `
+  <div class="page-head">
+    <div><div class="ttl">链路追踪</div><div class="sub">基于 Sidecar 上报的 OpenTelemetry 链路，按 TraceID 还原跨服务调用路径。</div></div>
+    <div class="acts">
+      <div class="seg">
+        ${[['1h', '1 小时'], ['6h', '6 小时'], ['24h', '24 小时']].map(([k, n]) =>
+          `<button class="${S.traceRange === k ? 'on' : ''}" onclick="traceRange('${k}')">${n}</button>`).join('')}
+      </div>
+      <button class="btn" onclick="toast('已刷新，最新链路 12 秒前上报')">${icon('refresh', '', 14)}刷新</button>
+    </div>
+  </div>
+  ${meshBanner()}
+  ${meshTabs('/mesh/tracing')}
+
+  <div class="grid g4" style="margin-bottom:14px">
+    <div class="stat"><div class="lab">采样链路</div><div class="val">128.4<small>k</small></div><div class="foot">近 1 小时 · 采样率 <b>12.5%</b></div></div>
+    <div class="stat"><div class="lab">平均链路耗时</div><div class="val">86<small>ms</small></div><div class="foot"><span class="up">-4ms</span> 较昨日同时段</div></div>
+    <div class="stat"><div class="lab">P99 链路耗时</div><div class="val">1.42<small>s</small></div><div class="foot">主要来自支付渠道出口</div></div>
+    <div class="stat"><div class="lab">异常链路</div><div class="val" style="color:var(--danger)">0.03<small>%</small></div><div class="foot">${errCount} 条样本 · 含 5xx 与超时</div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="toolbar">
+      <div class="search" style="margin:0;width:250px">${icon('search', '', 14)}
+        <input placeholder="TraceID / 接口 / 服务" value="${esc(S.traceQ)}" oninput="traceQuery(this.value)" />
+      </div>
+      <select class="input" style="width:170px;height:30px;padding:0 8px;font-size:12px" onchange="traceService(this.value)">
+        <option value="all"${S.traceSvc === 'all' ? ' selected' : ''}>全部服务</option>
+        ${traceServices().map(s => `<option value="${esc(s)}"${S.traceSvc === s ? ' selected' : ''}>${esc(s)}</option>`).join('')}
+      </select>
+      ${['all', '正常', '慢调用', '错误', '超时'].map(k =>
+        `<button class="filter-pill ${S.traceSt === k ? 'on' : ''}" onclick="traceStatus('${k}')">${k === 'all' ? '全部' : k}</button>`).join('')}
+      <div class="grow"><span class="tiny muted" style="align-self:center" id="trace-count">${list.length} 条链路</span></div>
+    </div>
+    <table class="table">
+      <thead><tr><th>状态</th><th>TraceID</th><th>入口接口</th><th>根服务</th><th style="width:190px">耗时</th><th class="right">Span</th><th>开始时间</th></tr></thead>
+      <tbody id="trace-rows">${traceRows(list)}</tbody>
+    </table>
+  </div>
+
+  <div id="trace-panel">${tracePanel()}</div>`;
+}
+
+function traceRows(list) {
+  if (!list.length) {
+    return `<tr><td colspan="7"><div class="empty" style="padding:34px 16px">
+      <h3>没有匹配的链路</h3><p>换一个服务或状态筛选，或清空搜索关键词。</p></div></td></tr>`;
+  }
+  const max = Math.max(...list.map(t => t.dur));
+  return list.map(t => {
+    const on = t.id === S.traceSel;
+    const bar = t.status === '错误' || t.status === '超时'
+      ? 'var(--danger)' : t.status === '慢调用' ? 'var(--warning)' : 'var(--primary)';
+    return `<tr class="clickable ${on ? 'sel' : ''}" onclick="selectTrace('${t.id}')">
+      <td>${badge(t.status)}</td>
+      <td class="mono" style="font-size:11px;color:${on ? 'var(--primary)' : 'var(--text-2)'}">${t.id}</td>
+      <td class="name" style="font-weight:550">${esc(t.root)}</td>
+      <td class="mono" style="font-size:11px">${esc(t.spans[0].svc)}</td>
+      <td>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="progress" style="width:104px;height:5px;flex:none"><div style="width:${(t.dur / max) * 100}%;background:${bar}"></div></div>
+          <span class="mono" style="font-size:11px;color:var(--text)">${fmtMs(t.dur)}</span>
+        </div>
+      </td>
+      <td class="right num">${t.spans.length}</td>
+      <td class="mono" style="font-size:11px;color:var(--text-3)">${t.at}</td>
+    </tr>`;
+  }).join('');
+}
+
+function tracePanel() {
+  const t = (DB.mesh.traces || []).find(x => x.id === S.traceSel);
+  if (!t) {
+    const filtered = S.traceQ || S.traceSvc !== 'all' || S.traceSt !== 'all';
+    return `<div class="card"><div class="empty" style="padding:40px 16px">
+      <h3>${filtered ? '当前筛选下没有链路' : '选择一条链路查看瀑布图'}</h3>
+      <p>${filtered ? '调整上方的搜索关键词或筛选条件后再试。' : '上方列表中的每条 Trace 都可展开为跨服务的 Span 时序。'}</p></div></div>`;
+  }
+  const sp = t.spans[S.traceSpan] || t.spans[0];
+  const svcs = new Set(t.spans.map(s => s.svc));
+  return `<div class="card">
+    <div class="card-head">
+      <span style="color:var(--primary)">${icon('trace', '', 15)}</span>
+      <div class="t">${esc(t.root)}</div>
+      ${badge(t.status)}
+      <div class="r">
+        <span class="mono tiny muted">${t.id}</span>
+        <button class="btn sm" onclick="copyTrace('${t.id}')">${icon('copy', '', 12)}复制</button>
+        <button class="btn sm" onclick="location.hash='/mesh/topology'">查看拓扑</button>
+      </div>
+    </div>
+    <div class="wf-meta">
+      <span>耗时 <b>${fmtMs(t.dur)}</b></span>
+      <span>Span <b>${t.spans.length}</b></span>
+      <span>服务 <b>${svcs.size}</b></span>
+      <span>开始 <b>${t.at}</b></span>
+      <span style="margin-left:auto">点击任意 Span 查看标签与事件</span>
+    </div>
+    <div class="trace-wrap">
+      <div class="wf">
+        <div class="wf-head">
+          <div>服务 / 操作</div>
+          <div class="wf-axis">
+            ${[0, 25, 50, 75, 100].map(p => `<span style="left:${p}%">${p === 100 ? fmtMs(t.dur) : p + '%'}</span>`).join('')}
+          </div>
+          <div style="text-align:right">耗时</div>
+        </div>
+        ${t.spans.map((s, i) => {
+          const depth = spanDepth(t.spans, i);
+          const c = s.status === 'err' ? 'var(--danger)' : svcColor(s.svc);
+          return `<div class="sp ${S.traceSpan === i ? 'on' : ''}" onclick="selectSpan(${i})">
+            <div class="sp-l" style="padding-left:${6 + depth * 14}px">
+              <i class="sp-dot" style="background:${c}"></i>
+              <span class="sp-name">${esc(s.name)}</span>
+              <span class="sp-svc">${esc(s.svc)}</span>
+            </div>
+            <div class="sp-t">
+              <div class="sp-bar" style="left:${(s.start / t.dur) * 100}%;width:${Math.max((s.dur / t.dur) * 100, 0.5)}%;background:${c}"></div>
+            </div>
+            <div class="sp-d">${fmtMs(s.dur)}</div>
+          </div>`;
+        }).join('')}
+        ${selfTimeBlock(t)}
+      </div>
+      ${spanDetail(t, sp)}
+    </div>
+  </div>`;
+}
+
+function spanDetail(t, sp) {
+  const idx = t.spans.indexOf(sp);
+  const share = (sp.dur / t.dur) * 100;
+  const kindMap = { server: '服务端', client: '客户端', producer: '生产者', consumer: '消费者', db: '数据库' };
+  return `<div class="sd">
+    <div class="sd-h">
+      <div style="min-width:0">
+        <div class="sd-name">${esc(sp.name)}</div>
+        <div class="sd-sub mono">${esc(sp.svc)} · ${kindMap[sp.kind] || sp.kind}</div>
+      </div>
+      ${badge(sp.status === 'err' ? '错误' : '正常')}
+    </div>
+    <dl class="kv" style="grid-template-columns:70px 1fr">
+      <dt>耗时</dt><dd class="mono">${fmtMs(sp.dur)}</dd>
+      <dt>起始偏移</dt><dd class="mono">+${sp.start}ms</dd>
+      <dt>链路占比</dt><dd class="mono">${share.toFixed(1)}%</dd>
+      <dt>序号</dt><dd class="mono">#${idx + 1} / ${t.spans.length}</dd>
+      <dt>Pod</dt><dd class="mono" style="font-size:10.5px;word-break:break-all">${esc(sp.pod)}</dd>
+    </dl>
+    <div class="sd-sec">Span 标签</div>
+    <div class="sd-tags">
+      <div class="sd-tag"><b>span.kind</b><span>${esc(sp.kind)}</span></div>
+      ${Object.entries(sp.tags || {}).map(([k, v]) =>
+        `<div class="sd-tag"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join('')}
+    </div>
+    ${(sp.events || []).length ? `
+      <div class="sd-sec">事件</div>
+      <div class="ev-list">
+        ${sp.events.map(e => `<div class="ev"><i></i><div><div class="ev-t mono">${esc(e.t)}</div><div class="ev-x">${esc(e.tx)}</div></div></div>`).join('')}
+      </div>` : ''}
+    <div class="sd-note">相对链路起点偏移 ${sp.start}ms · 自身耗时 ${fmtMs(selfTime(t.spans, idx))}</div>
+  </div>`;
+}
+
+/* 自身耗时：总时长减去直接子 span 时长，按服务聚合后用于耗时分布 */
+function selfTime(spans, i) {
+  const children = spans.filter(s => s.p === i).reduce((a, s) => a + s.dur, 0);
+  return Math.max(0, spans[i].dur - children);
+}
+function selfTimeBlock(t) {
+  const agg = {};
+  t.spans.forEach((s, i) => { agg[s.svc] = (agg[s.svc] || 0) + selfTime(t.spans, i); });
+  const rows = Object.entries(agg).sort((a, b) => b[1] - a[1]);
+  const max = rows.length ? rows[0][1] : 1;
+  return `<div class="wf-dist">
+    <div class="wf-dist-h">耗时分布 <span>按服务统计自身耗时（已剔除子调用）</span></div>
+    ${rows.map(([svc, ms]) => `<div class="wf-dist-row">
+      <span class="wf-dist-n"><i style="background:${svcColor(svc)}"></i>${esc(svc)}</span>
+      <div class="wf-dist-t"><div style="width:${(ms / max) * 100}%;background:${svcColor(svc)}"></div></div>
+      <span class="wf-dist-v mono">${fmtMs(ms)}</span>
+      <span class="wf-dist-p mono">${((ms / t.dur) * 100).toFixed(1)}%</span>
+    </div>`).join('')}
+  </div>`;
+}
+
+function paintTrace() {
+  const list = traceFiltered();
+  if (!list.some(t => t.id === S.traceSel)) {
+    S.traceSel = list.length ? list[0].id : '';
+    S.traceSpan = 0;
+  }
+  const rows = $('#trace-rows');
+  if (rows) rows.innerHTML = traceRows(list);
+  const cnt = $('#trace-count');
+  if (cnt) cnt.textContent = `${list.length} 条链路`;
+  const panel = $('#trace-panel');
+  if (panel) panel.innerHTML = tracePanel();
+}
+function selectTrace(id) { S.traceSel = id; S.traceSpan = 0; paintTrace(); }
+function selectSpan(i) { S.traceSpan = i; paintTrace(); }
+function traceQuery(v) { S.traceQ = v; paintTrace(); }
+function traceService(v) { S.traceSvc = v; paintTrace(); }
+function traceStatus(v) {
+  S.traceSt = v;
+  document.querySelectorAll('.filter-pill').forEach(el => el.classList.remove('on'));
+  const btn = [...document.querySelectorAll('.filter-pill')].find(b => b.textContent.trim() === (v === 'all' ? '全部' : v));
+  if (btn) btn.classList.add('on');
+  paintTrace();
+}
+function traceRange(k) {
+  S.traceRange = k;
+  document.querySelectorAll('.seg button').forEach(b => b.classList.remove('on'));
+  const i = ['1h', '6h', '24h'].indexOf(k);
+  const btn = document.querySelectorAll('.page-head .seg button')[i];
+  if (btn) btn.classList.add('on');
+  toast(`时间范围已切换至 ${k === '1h' ? '1 小时' : k === '6h' ? '6 小时' : '24 小时'}（原型演示数据不变）`);
+}
+function copyTrace(id) {
+  const done = () => toast('TraceID 已复制：' + id, 'ok');
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(id).then(done).catch(done);
+  else done();
+}
+/* 从服务治理 / 拓扑跳转到按服务过滤的链路列表 */
+function openTraceBySvc(svc) {
+  S.traceSvc = svc || 'all';
+  S.traceSt = 'all';
+  S.traceQ = '';
+  S.traceSel = '';
+  goto('/mesh/tracing');
 }
 
 /* ---------- 云边端 ---------- */
@@ -2340,7 +2628,8 @@ function viewDesign() {
           ['全局入口视图', '应用管理 → 访问入口，跨应用汇总所有对外地址', '/access'],
           ['流水线阶段', '选择一条运行中的流水线查看阶段流程与实时日志', '/cicd/pl-order'],
           ['跨端调度视图', '工作负载页按「边缘 / 端侧」筛选', '/workloads'],
-          ['服务拓扑', 'Service Mesh → 服务拓扑，查看调用关系与异常链路', '/mesh/topology']
+          ['服务拓扑', 'Service Mesh → 服务拓扑，查看调用关系与异常链路', '/mesh/topology'],
+          ['链路追踪', 'Service Mesh → 链路追踪，点开慢链路看瀑布图与耗时分布', '/mesh/tracing']
         ].map(([t, d, r]) => `
           <div style="display:flex;gap:9px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer" onclick="location.hash='${r}'">
             <span style="color:var(--primary);margin-top:1px">${icon('chev', '', 13)}</span>
@@ -2821,6 +3110,7 @@ function route() {
   else if (seg[0] === 'artifacts') html = viewArtifacts();
   else if (seg[0] === 'mesh' && seg[1] === 'traffic') html = viewMeshTraffic();
   else if (seg[0] === 'mesh' && seg[1] === 'topology') html = viewMeshTopology();
+  else if (seg[0] === 'mesh' && seg[1] === 'tracing') html = viewMeshTracing();
   else if (seg[0] === 'mesh') html = viewMesh();
   else if (seg[0] === 'edge' && seg[1] === 'distribute') html = viewEdgeDistribute();
   else if (seg[0] === 'edge' && seg[1] === 'devices') html = viewEdgeDevices();
