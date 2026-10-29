@@ -21,7 +21,15 @@ const S = {
   traceSt: 'all',
   traceSel: '',
   traceSpan: 0,
-  traceRange: '1h'
+  traceRange: '1h',
+  wlTab: 'overview',
+  wlRange: '1h',
+  wlKey: '',
+  wlPending: null,
+  yamlDiff: false,
+  logs: { key: '', lines: [], level: 'all', q: '', container: '', paused: false, pending: 0, follow: true },
+  term: [],
+  termKey: ''
 };
 
 /* ---------------- 演示数据快照 ----------------
@@ -926,7 +934,10 @@ function appTabBody(app) {
         <div style="border-top:1px solid var(--border);padding:14px 16px;background:var(--surface-2)">
           <div class="spread" style="margin-bottom:11px">
             <div style="font-size:12.5px;font-weight:650">${esc(wl.name)} <span class="chip">${esc(wl.kind)}</span></div>
-            <button class="btn sm ghost" onclick="S.appWl=null;route()">收起</button>
+            <div style="display:flex;gap:7px">
+              <button class="btn sm primary" onclick="wlOpen('${app.id}','${comp.name}','${wl.name}','overview')">打开详情</button>
+              <button class="btn sm ghost" onclick="S.appWl=null;route()">收起</button>
+            </div>
           </div>
           <div class="grid g2" style="gap:16px">
             <dl class="kv">
@@ -943,10 +954,10 @@ function appTabBody(app) {
             </dl>
           </div>
           <div style="display:flex;gap:7px;margin-top:12px">
-            <button class="btn sm" onclick="toast('查看日志（原型）')">日志</button>
-            <button class="btn sm" onclick="toast('进入容器终端（原型）')">终端</button>
-            <button class="btn sm" onclick="toast('工作负载 YAML（原型）')">YAML</button>
-            <button class="btn sm" onclick="toast('已重启工作负载')">${icon('refresh', '', 12)}重启</button>
+            <button class="btn sm" onclick="wlOpen('${app.id}','${comp.name}','${wl.name}','logs')">日志</button>
+            <button class="btn sm" onclick="wlOpen('${app.id}','${comp.name}','${wl.name}','terminal')">终端</button>
+            <button class="btn sm" onclick="wlOpen('${app.id}','${comp.name}','${wl.name}','yaml')">YAML</button>
+            <button class="btn sm" onclick="wlRestart('${app.id}','${comp.name}','${wl.name}')">${icon('refresh', '', 12)}重启</button>
             <button class="btn sm danger" style="margin-left:auto" onclick="deleteWorkload('${app.id}','${comp.name}','${wl.name}')">删除</button>
           </div>
         </div>` : ''}
@@ -1482,7 +1493,7 @@ function viewWorkloads() {
     <table class="table">
       <thead><tr><th>工作负载</th><th>所属应用 / 组件</th><th>类型</th><th>副本</th><th>状态</th><th>调度</th><th>集群</th><th>CPU</th><th class="right">重启</th></tr></thead>
       <tbody>
-        ${list.map(w => `<tr class="clickable" onclick="location.hash='/apps/${w.appId}'">
+        ${list.map(w => `<tr class="clickable" onclick="wlOpen('${w.appId}','${esc(w.comp)}','${esc(w.name)}','overview')">
           <td class="name">${esc(w.name)}<div class="sub mono">${esc(w.image)}</div></td>
           <td>${esc(w.app)}<div class="sub">${esc(w.comp)}</div></td>
           <td><span class="chip">${esc(w.kind)}</span></td>
@@ -1497,6 +1508,889 @@ function viewWorkloads() {
     </table>
     </div>
   </div>`;
+}
+
+/* ==========================================================
+   工作负载详情：实例 / 指标 / 日志 / 事件 / YAML / 终端
+   运行时数据由工作负载字段确定性生成，新建的负载同样有合理数据
+   ========================================================== */
+function wlUrl(appId, comp, name) {
+  return `#/workloads/${encodeURIComponent(appId)}/${encodeURIComponent(comp)}/${encodeURIComponent(name)}`;
+}
+function wHash(s) {
+  let h = 2166136261;
+  for (const ch of String(s)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function parsePair(s) { // "1.8 / 8c" → [1.8, 8]（兼容旧调用）
+  const r = parseRes(s);
+  return [r.cur, r.cap];
+}
+/* 解析 "2Gi / 4Gi"、"256Mi / 512Mi"、"1.8 / 8c"，统一到 c 与 Gi */
+function parseRes(s, kind) {
+  const str = String(s || '');
+  const m = str.match(/([\d.]+)\s*([A-Za-z%]*)\s*\/\s*([\d.]+)\s*([A-Za-z%]*)/);
+  if (!m) return { cur: 0, cap: 1, unit: kind === 'mem' ? 'Gi' : 'c' };
+  let cur = parseFloat(m[1]), cap = parseFloat(m[3]);
+  let unit = m[4] || m[2] || (kind === 'mem' ? 'Gi' : 'c');
+  if (kind === 'mem' && /^Mi$/i.test(unit)) { cur /= 1024; cap /= 1024; unit = 'Gi'; }
+  if (kind === 'mem' && /^Gi$/i.test(unit)) unit = 'Gi';
+  return { cur, cap, unit };
+}
+/* 数值展示：大数取整、小数保留有效位 */
+function fmtQty(v) {
+  if (!isFinite(v)) return '0';
+  const a = Math.abs(v);
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 10) return Number.isInteger(v) ? String(v) : v.toFixed(1);
+  if (a >= 1) return v.toFixed(1).replace(/\.0$/, '');
+  return v.toFixed(2).replace(/0$/, '');
+}
+/* 镜像引用：data 里既有纯 tag（v2.4.1）也有完整引用（mysql:8.0.34） */
+function imgRef(comp, w) {
+  if (!comp) return w.image;
+  return /:/.test(w.image) ? w.image : `${comp.image}:${w.image}`;
+}
+function wlFlavor(w) {
+  const n = (w.name + ' ' + w.kind).toLowerCase();
+  if (n.includes('cron') || n.includes('job') || n.includes('archiver') || n.includes('recon')) return 'job';
+  if (w.kind === 'StatefulSet' || n.includes('-db') || n.includes('mysql')) return 'db';
+  if (w.where === '边缘' || w.where === '端侧' || w.kind === 'EdgeApp') return 'edge';
+  if (n.includes('worker') || n.includes('consumer') || n.includes('collector')) return 'queue';
+  return 'http';
+}
+
+/* ---------- 实例（Pod） ---------- */
+function podsFor(w) {
+  const m = String(w.ready).match(/(\d+)\s*\/\s*(\d+)/);
+  const total = m ? +m[2] : 0, readyN = m ? +m[1] : 0;
+  if (!total) return [];
+  const r = mulberry32(wHash(w.name));
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const rc = parseRes(w.cpu, 'cpu'), rm = parseRes(w.mem, 'mem');
+  const pods = [];
+  for (let i = 0; i < total; i++) {
+    const hash = Array.from({ length: 9 }, () => alphabet[Math.floor(r() * alphabet.length)]).join('');
+    const suf = Array.from({ length: 5 }, () => alphabet[Math.floor(r() * alphabet.length)]).join('');
+    const ready = i < readyN;
+    const restarts = (w.restarts || 0) > 0 && i === total - 1 ? w.restarts : (r() > 0.9 ? 1 : 0);
+    const node = w.where === '云端'
+      ? `${w.cluster}-node-0${1 + Math.floor(r() * 6)}`
+      : w.where === '边缘' ? w.cluster : `dev-${20000 + Math.floor(r() * 800)}`;
+    pods.push({
+      name: `${w.name}-${hash}-${suf}`,
+      phase: ready ? 'Running' : (w.status === '待调度' ? 'Pending' : 'CrashLoopBackOff'),
+      ready: ready ? '1/1' : (w.status === '待调度' ? '0/1' : `0/1`),
+      restarts,
+      node,
+      ip: `10.${20 + Math.floor(r() * 20)}.${Math.floor(r() * 250)}.${2 + Math.floor(r() * 250)}`,
+      age: i === 0 ? w.age : `${1 + Math.floor(r() * 20)}h`,
+      cpu: (rc.cur / total * (0.8 + r() * 0.5)).toFixed(2),
+      mem: (rm.cur / total * (0.9 + r() * 0.3)).toFixed(2)
+    });
+  }
+  return pods;
+}
+
+/* ---------- 指标序列 ---------- */
+function walk(r, n, base, amp, lo, hi, spike) {
+  const out = []; let v = base;
+  const at = Math.floor(n * (0.22 + r() * 0.55));
+  for (let i = 0; i < n; i++) {
+    v += (r() - 0.5) * amp;
+    if (spike && i >= at && i < at + 3) v += amp * 0.95;
+    v = Math.max(lo, Math.min(hi, v));
+    out.push(v);
+  }
+  return out;
+}
+/* 让序列末端收敛到当前值，避免图表尾值和上方统计卡对不上 */
+function anchor(arr, target) {
+  const n = arr.length, delta = target - arr[n - 1];
+  return arr.map((v, i) => v + delta * Math.pow(i / (n - 1), 2.2));
+}
+function wlMetrics(w, range) {
+  const n = range === '15m' ? 45 : range === '6h' ? 72 : 60;
+  const r = mulberry32(wHash(w.name + range));
+  const { cur: cpuCur, cap: cpuCap } = parseRes(w.cpu, 'cpu');
+  const { cur: memCur, cap: memCap } = parseRes(w.mem, 'mem');
+  const load = w.status === '运行中' ? 1 : w.status === '已完成' ? 0 : 0.7;
+  const cpu = anchor(walk(r, n, cpuCur * load, cpuCap * 0.05, cpuCur * 0.4, cpuCap * 0.98, true), cpuCur * load);
+  const mem = anchor(walk(r, n, memCur * load, memCap * 0.03, memCur * 0.55, memCap * 0.97, false), memCur * load);
+  const baseRt = wlFlavor(w) === 'db' ? 18 : wlFlavor(w) === 'edge' ? 62 : 44;
+  const rt = walk(r, n, baseRt / (load || 1), baseRt * 0.32, baseRt * 0.4, baseRt * 4, true);
+  const qpsBase = wlFlavor(w) === 'job' ? 0.2 : 60 + (wHash(w.name) % 340);
+  const qps = walk(r, n, qpsBase, qpsBase * 0.2, qpsBase * 0.25, qpsBase * 1.8, false);
+  return { n, cpu, mem, rt, qps, cpuCap, memCap };
+}
+function axisLabels(range) {
+  if (range === '15m') return ['-15m', '-10m', '-5m', '现在'];
+  if (range === '6h') return ['-6h', '-4h', '-2h', '现在'];
+  return ['-1h', '-40m', '-20m', '现在'];
+}
+function chartCard(title, sub, vals, o) {
+  const W = 600, H = 110;
+  const color = o.color || 'var(--primary)';
+  const fmt = o.fmt || (v => v.toFixed(2));
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const pad = (max - min) * 0.2 || Math.abs(max * 0.1) || 1;
+  const lo = Math.max(0, min - pad), hi = max + pad;
+  const pts = vals.map((v, i) => [(i / (vals.length - 1)) * W, H - ((v - lo) / (hi - lo)) * H]);
+  const d = 'M' + pts.map(p => `${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' L');
+  const area = `${d} L${W} ${H} L0 ${H} Z`;
+  const last = vals[vals.length - 1];
+  return `<div class="chart" data-vals='${JSON.stringify(vals.map(v => +v.toFixed(2)))}' data-unit='${o.unit || ''}' data-span='${o.span || 60}'>
+    <div class="chart-h">
+      <div><div class="chart-t">${title}</div><div class="chart-s">${sub}</div></div>
+      <div class="chart-v">${fmt(last)}<small>${o.unit || ''}</small></div>
+    </div>
+    <div class="chart-body">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        <path d="${area}" fill="${color}" opacity=".09"/>
+        <path d="${d}" fill="none" stroke="${color}" stroke-width="1.7" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+        <line class="hl" x1="0" y1="0" x2="0" y2="${H}" stroke="#8b97ad" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke" opacity="0"/>
+        <circle class="hd" r="3.4" cx="0" cy="0" fill="${color}" stroke="#fff" stroke-width="1.6" opacity="0"/>
+      </svg>
+      <div class="chart-tip"></div>
+    </div>
+    <div class="chart-axis">${(o.labels || []).map(t => `<span>${t}</span>`).join('')}</div>
+  </div>`;
+}
+
+/* ---------- 日志 ---------- */
+const TRACE_IDS = ['4bf29a1c8e7d4f03', '9d0c2b7a4e51f8c6', '5a91c6e0f2b7d348', '7c33f0ab91d6e542', '2b8e6d1f45a7c093'];
+const LOG_RES = ['/api/order/submit', '/api/order/detail', '/api/cart/add', '/api/stock/deduct', '/api/pay/charge', '/api/user/profile', '/api/inventory/sync'];
+function stamp(ts) {
+  const d = new Date(ts);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+function mkLog(w, r, ts) {
+  const fl = wlFlavor(w);
+  const trace = TRACE_IDS[Math.floor(r() * TRACE_IDS.length)];
+  const pick = a => a[Math.floor(r() * a.length)];
+  const ms = (2 + r() * 180).toFixed(1);
+  const lvl = r() > 0.94 ? 'ERROR' : r() > 0.84 ? 'WARN' : r() > 0.16 ? 'INFO' : 'DEBUG';
+  let msg;
+  if (fl === 'http') {
+    const code = lvl === 'ERROR' ? pick([500, 502, 503]) : pick([200, 200, 200, 201, 204, 304]);
+    msg = r() > 0.45
+      ? `${pick(['POST', 'GET', 'PUT'])} ${pick(LOG_RES)} ${code} ${ms}ms trace=${trace}`
+      : `${pick(['orderService', 'inventoryClient', 'payGateway'])} ${lvl === 'ERROR' ? 'call failed: context deadline exceeded' : 'call ok'} cost=${ms}ms peer=${pick(['order-service', 'inventory-service', 'pay-router'])}`;
+    if (lvl === 'ERROR' && r() > 0.6) msg += ' err="upstream reset by peer"';
+  } else if (fl === 'queue') {
+    msg = pick([
+      `consume topic=${pick(['order.created', 'stock.updated', 'pay.result'])} partition=${Math.floor(r() * 6)} offset=${100000 + Math.floor(r() * 90000)} lag=${Math.floor(r() * 40)}`,
+      `batch commit ${Math.floor(r() * 120) + 1} records cost=${ms}ms`,
+      `ack topic=order.created msgId=${Math.floor(r() * 1e9).toString(36)}`
+    ]);
+    if (lvl === 'ERROR') msg = `consume failed topic=order.created retry=${1 + Math.floor(r() * 3)} err="deserialize payload: unexpected end of JSON"`;
+  } else if (fl === 'job') {
+    msg = pick([
+      `job start schedule="*/5 * * * *" runId=${Math.floor(r() * 1e6)}`,
+      `archived 1284 rows shard=${Math.floor(r() * 8)} cost=${ms}ms`,
+      `job finish status=success duration=${(20 + r() * 40).toFixed(1)}s`
+    ]);
+  } else if (fl === 'db') {
+    msg = pick([
+      `slow query 412ms rows_examined=182044 sql="SELECT * FROM order_item WHERE created_at > ?"`,
+      `connection pool active=18 idle=6 waiting=0`,
+      `checkpoint complete lsn=${Math.floor(r() * 1e9).toString(16)}`
+    ]);
+    if (lvl === 'WARN') msg = `slow query ${(400 + r() * 900).toFixed(0)}ms rows_examined=${Math.floor(r() * 500000)}`;
+  } else {
+    msg = pick([
+      `sync to cloud edges=${Math.floor(r() * 12) + 1} bytes=${Math.floor(r() * 4000) + 200} cost=${ms}ms`,
+      `edge heartbeat node=${pick(['edge-sh-007', 'edge-sh-021', 'edge-hz-004'])} rtt=${(6 + r() * 30).toFixed(0)}ms`,
+      `offline buffer flush records=${Math.floor(r() * 200)}`
+    ]);
+  }
+  return { t: ts, level: lvl, msg };
+}
+function seedLogs(w, count) {
+  const r = mulberry32(wHash(w.name + 'logs'));
+  const now = Date.now();
+  const out = [];
+  for (let i = 0; i < count; i++) out.push(mkLog(w, r, now - (count - i) * 1400));
+  return out;
+}
+
+/* ---------- 事件 ---------- */
+function eventsFor(w, comp) {
+  const r = mulberry32(wHash(w.name + 'ev'));
+  const img = imgRef(comp, w);
+  const ev = [
+    { type: 'Normal', reason: 'Scheduled', msg: `Successfully assigned retail-prod/${w.name} to ${w.cluster}-node-0${1 + Math.floor(r() * 5)}`, count: 1, age: w.age },
+    { type: 'Normal', reason: 'Pulling', msg: `Pulling image "${img}"`, count: 1, age: w.age },
+    { type: 'Normal', reason: 'Started', msg: 'Started container ' + w.name, count: 1, age: w.age }
+  ];
+  if ((w.restarts || 0) > 0) {
+    ev.push({ type: 'Warning', reason: 'Unhealthy', msg: `Liveness probe failed: Get "http://10.24.7.19:8080/healthz": context deadline exceeded`, count: w.restarts, age: '32m' });
+    ev.push({ type: 'Warning', reason: 'BackOff', msg: 'Back-off restarting failed container', count: w.restarts, age: '31m' });
+  }
+  if (w.status !== '运行中' && w.status !== '已完成') {
+    ev.push({ type: 'Warning', reason: w.status === '待调度' ? 'FailedScheduling' : 'Unhealthy', msg: w.status === '待调度' ? '0/6 nodes are available: 6 Insufficient cpu.' : 'Readiness probe failed: connection refused', count: 4, age: '8m' });
+  }
+  if (w.mesh === '已注入' && S.modules.mesh) {
+    ev.push({ type: 'Normal', reason: 'SidecarInjected', msg: 'istio-proxy injected, mTLS strict mode active', count: 1, age: w.age });
+  }
+  return ev;
+}
+
+/* ---------- YAML ---------- */
+function yamlFor(app, comp, w) {
+  if (w.kind === 'CronJob') return cronYaml(app, comp, w);
+  const { cur: cpuCur, cap: cpuCap } = parseRes(w.cpu, 'cpu');
+  const { cur: memCur, cap: memCap } = parseRes(w.mem, 'mem');
+  const np = (String(w.ready).match(/\/(\d+)/) || [, 1])[1] | 0;
+  const reqCpu = Math.max(0.1, cpuCap / 4), reqMem = Math.max(0.25, memCap / 2);
+  const inject = w.mesh === '已注入' && S.modules.mesh;
+  const base = [
+    'apiVersion: apps/v1',
+    `kind: ${w.kind === 'StatefulSet' ? 'StatefulSet' : w.kind === 'CronJob' ? 'CronJob' : w.where !== '云端' ? 'EdgeApp' : 'Deployment'}`,
+    'metadata:',
+    `  name: ${w.name}`,
+    `  namespace: ${app.id.split('-')[0]}-prod`,
+    '  labels:',
+    `    app.kubernetes.io/name: ${comp.name}`,
+    `    app.kubernetes.io/component: ${comp.name}`,
+    `    app.kubernetes.io/part-of: ${app.id}`,
+    `    platform.io/application-id: ${app.id}`,
+    'spec:',
+    `  replicas: ${np}`,
+    '  strategy:',
+    '    type: RollingUpdate',
+    '    rollingUpdate:',
+    '      maxSurge: 25%',
+    '      maxUnavailable: 0',
+    '  selector:',
+    '    matchLabels:',
+    `      app: ${w.name}`,
+    '  template:',
+    '    metadata:',
+    '      labels:',
+    `        app: ${w.name}`,
+    '      annotations:',
+    `        sidecar.istio.io/inject: "${inject ? 'true' : 'false'}"`,
+    '        platform.io/scheduled-to: ' + w.where,
+    '    spec:',
+    `      serviceAccountName: ${app.id}-sa`,
+    '      nodeSelector:',
+    `        topology.kubernetes.io/region: ${w.where === '云端' ? 'cn-east-1' : 'edge'}`,
+    '      containers:',
+    `        - name: ${w.name}`,
+    `          image: ${imgRef(comp, w)}`,
+    '          imagePullPolicy: IfNotPresent',
+    '          ports:',
+    '            - containerPort: 8080',
+    '              name: http',
+    '          resources:',
+    '            requests:',
+    `              cpu: "${Math.round(reqCpu * 1000)}m"`,
+    `              memory: "${reqMem}Gi"`,
+    '            limits:',
+    `              cpu: "${cpuCap}"`,
+    `              memory: "${memCap}Gi"`,
+    '          env:',
+    '            - name: APP_ENV',
+    '              value: prod',
+    '            - name: OTEL_EXPORTER_OTLP_ENDPOINT',
+    '              value: http://otel-collector.observability:4317',
+    '          livenessProbe:',
+    '            httpGet:',
+    '              path: /healthz',
+    '              port: 8080',
+    '            initialDelaySeconds: 15',
+    '            periodSeconds: 10',
+    '          readinessProbe:',
+    '            httpGet:',
+    '              path: /readyz',
+    '              port: 8080',
+    '            periodSeconds: 5'
+  ];
+  const kind = String(base[1] || '').replace('kind: ', '');
+  if (kind === 'StatefulSet') {
+    const i = base.indexOf('  selector:');
+    base.splice(i, 0, `  serviceName: ${w.name}-headless`, '  podManagementPolicy: OrderedReady');
+    base.push('  volumeClaimTemplates:');
+    base.push('    - metadata:');
+    base.push('        name: data');
+    base.push('      spec:');
+    base.push('        accessModes: ["ReadWriteOnce"]');
+    base.push('        resources:');
+    base.push('          requests:');
+    base.push(`            storage: 100Gi`);
+  }
+  if (kind === 'EdgeApp') {
+    base[0] = 'apiVersion: edge.platform.io/v1alpha1';
+    const i = base.findIndex(l => /^  replicas: /.test(l));
+    base.splice(i + 1, 0,
+      '  targetNodes:',
+      `    selector: topology.kubernetes.io/region=edge`,
+      `    count: 12`,
+      '  offlinePolicy:',
+      '    bufferSeconds: 3600',
+      '    onReconnect: replay');
+  }
+  return base;
+}
+function cronYaml(app, comp, w) {
+  const { cur: cpuCur, cap: cpuCap } = parseRes(w.cpu, 'cpu');
+  const { cur: memCur, cap: memCap } = parseRes(w.mem, 'mem');
+  return [
+    'apiVersion: batch/v1',
+    'kind: CronJob',
+    'metadata:',
+    `  name: ${w.name}`,
+    `  namespace: ${app.id.split('-')[0]}-prod`,
+    '  labels:',
+    `    app.kubernetes.io/name: ${comp.name}`,
+    `    app.kubernetes.io/part-of: ${app.id}`,
+    'spec:',
+    '  schedule: "*/5 * * * *"',
+    '  concurrencyPolicy: Forbid',
+    '  startingDeadlineSeconds: 120',
+    '  successfulJobsHistoryLimit: 3',
+    '  failedJobsHistoryLimit: 1',
+    '  jobTemplate:',
+    '    spec:',
+    '      backoffLimit: 2',
+    '      template:',
+    '        metadata:',
+    '          labels:',
+    `            app: ${w.name}`,
+    '        spec:',
+    '          restartPolicy: OnFailure',
+    `          serviceAccountName: ${app.id}-sa`,
+    '          containers:',
+    `            - name: ${w.name}`,
+    `              image: ${imgRef(comp, w)}`,
+    '              args: ["--schedule=cron", "--once=false"]',
+    '              resources:',
+    '                requests:',
+    `                  cpu: "${Math.round(Math.max(0.1, cpuCap / 8) * 1000)}m"`,
+    `                  memory: "${Math.max(0.25, memCap / 4)}Gi"`,
+    '                limits:',
+    `                  cpu: "${cpuCap}"`,
+    `                  memory: "${memCap}Gi"`,
+    '              env:',
+    '                - name: APP_ENV',
+    '                  value: prod',
+    '                - name: JOB_DRY_RUN',
+    '                  value: "false"'
+  ];
+}
+function yamlDrift(lines) {
+  // 线上运行态与仓库声明的差异：副本被手工扩过、镜像带 hotfix、多了一个调试环境变量
+  return lines.map(l => {
+    if (/^  replicas: /.test(l)) return l.replace(/\d+/, m => String(+m + 1));
+    if (/^  schedule: /.test(l)) return l.replace(/\*\/\d+/, '*/2');
+    if (/^\s+image: /.test(l) && /:v?\d/.test(l)) return l.replace(/:v?([\d.]+)$/, ':v$1-hotfix');
+    if (/^\s+- name: APP_ENV/.test(l)) {
+      const ind = l.match(/^(\s*)/)[1];
+      return `${ind}- name: DEBUG_PROFILE\n${ind}  value: "true"\n` + l;
+    }
+    return l;
+  }).join('\n').split('\n');
+}
+function hlYaml(line) {
+  if (/^\s*#/.test(line)) return `<span class="y-c">${esc(line)}</span>`;
+  const kv = line.match(/^(\s*)(-\s+)?([A-Za-z0-9_.\/-]+)(:)(.*)$/);
+  if (kv) {
+    const [, sp, dash, k, colon, rest] = kv;
+    return `${sp}${dash || ''}<span class="y-k">${k}</span>${colon}${hlVal(esc(rest))}`;
+  }
+  return hlVal(esc(line));
+}
+function hlVal(s) {
+  return s
+    .replace(/(&quot;[^&]*?&quot;)/g, '<span class="y-s">$1</span>')
+    .replace(/(^|\s)(true|false|null)(\s|$)/g, '$1<span class="y-b">$2</span>$3')
+    .replace(/(\s)([\d.]+[a-zA-Z%]*)/g, '$1<span class="y-n">$2</span>');
+}
+function diffLines(a, b) {
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out = []; let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push([' ', a[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push(['-', a[i]]); i++; }
+    else { out.push(['+', b[j]]); j++; }
+  }
+  while (i < n) out.push(['-', a[i++]]);
+  while (j < m) out.push(['+', b[j++]]);
+  return out;
+}
+
+/* ---------- 终端 ---------- */
+const TERM_HELP = `可用命令（原型模拟）：
+  ls                  查看工作目录
+  env                 环境变量
+  cat /etc/os-release 基础镜像信息
+  ps                  进程列表
+  curl localhost:8080/healthz   健康检查
+  clear               清屏`;
+function termWelcome(w) {
+  return [
+    { k: 'sys', v: `Connected to ${w.name} · ${w.cluster}` },
+    { k: 'sys', v: `容器 ${w.name} /bin/sh · 30 分钟无操作自动断开 · 输入 help 查看可用命令` }
+  ];
+}
+function termRun(w, raw) {
+  const cmd = (raw || '').trim();
+  if (!cmd) return;
+  const out = [{ k: 'cmd', v: `$ ${cmd}` }];
+  const push = (v, k = 'out') => out.push({ k, v });
+  switch (cmd) {
+    case 'ls':
+      push('bin  boot  dev  etc  healthz  home  lib  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var  workspace');
+      break;
+    case 'env':
+      push('APP_ENV=prod'); push(`POD_NAME=${w.name}-5b6c8d`); push(`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability:4317`);
+      push(`OTEL_SERVICE_NAME=${w.name}`); push('JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75'); push('PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/bin');
+      break;
+    case 'cat /etc/os-release':
+      push('NAME="Alpine Linux"'); push('VERSION="3.20.3"'); push('ID=alpine'); push('PRETTY_NAME="Alpine Linux v3.20"');
+      break;
+    case 'ps':
+    case 'ps aux':
+      push('PID   USER   TIME  COMMAND');
+      push(`    1 root   0:12  /app/${w.name}`);
+      push('   18 root   0:03  /usr/local/bin/envoy -c /etc/istio/proxy/envoy-rev.json');
+      push('   42 root   0:00  /bin/sh');
+      break;
+    case 'curl localhost:8080/healthz':
+    case 'curl -s localhost:8080/healthz':
+      push('{"status":"UP","checks":[{"name":"db","status":"UP"},{"name":"redis","status":"UP"}]}');
+      break;
+    case 'help':
+      push(TERM_HELP);
+      break;
+    case 'clear':
+      return 'clear';
+    default:
+      push(`/bin/sh: ${cmd}: not found`, 'err');
+  }
+  return out;
+}
+
+/* ---------- 详情页 ---------- */
+function viewWorkloadDetail(appId, compName, wlName) {
+  const app = DB.apps.find(a => a.id === appId);
+  const comp = app && app.components.find(c => c.name === compName);
+  const wl = comp && comp.workloads.find(w => w.name === wlName);
+  setCrumb(app ? app.name : '工作负载');
+
+  if (!wl) {
+    return `<div class="card"><div class="empty" style="padding:60px 20px">
+      <h3>找不到该工作负载</h3>
+      <p>它可能已被删除，或链接里的应用 / 组件名不匹配。</p>
+      <button class="btn primary" onclick="location.hash='/workloads'">返回工作负载列表</button>
+    </div></div>`;
+  }
+
+  const wlKey = `${appId}/${compName}/${wlName}`;
+  if (S.wlKey !== wlKey) {
+    S.wlKey = wlKey;
+    S.wlTab = S.wlPending || 'overview';
+    S.wlPending = null;
+    S.term = [];
+    S.termKey = '';
+    S.yamlDiff = false;
+  }
+
+  const tabs = [['overview', '概览'], ['metrics', '指标'], ['logs', '日志'], ['events', '事件'], ['yaml', 'YAML'], ['terminal', '终端']];
+  const { cur: cpuCur, cap: cpuCap } = parseRes(wl.cpu, 'cpu');
+  const { cur: memCur, cap: memCap } = parseRes(wl.mem, 'mem');
+  const pods = podsFor(wl);
+
+  return `
+  <div class="page-head">
+    <div style="min-width:0">
+      <div class="ttl" style="display:flex;align-items:center;gap:9px">${esc(wl.name)} ${badge(wl.status)} <span class="chip">${esc(wl.kind)}</span></div>
+      <div class="sub">
+        <span class="link" onclick="location.hash='/apps/${app.id}/components'">${esc(app.name)}</span>
+        <span class="muted"> / </span>
+        <span class="link" onclick="location.hash='/apps/${app.id}/components'">${esc(comp.name)}</span>
+        <span class="muted"> / </span><span class="mono">${esc(wl.image)}</span>
+        · ${whereChip(wl.where)} <span class="mono">${esc(wl.cluster)}</span>
+        ${wl.mesh === '已注入' && S.modules.mesh ? '· <span class="badge info">Sidecar 已注入</span>' : ''}
+      </div>
+    </div>
+    <div class="acts">
+      <button class="btn" onclick="wlGo('logs')">${icon('doc', '', 14)}日志</button>
+      <button class="btn" onclick="wlGo('terminal')">${icon('server', '', 14)}终端</button>
+      <button class="btn" onclick="wlRestart('${app.id}','${comp.name}','${wl.name}')">${icon('refresh', '', 14)}重启</button>
+      <button class="btn primary" onclick="location.hash='/cicd'">${icon('flow', '', 14)}发布</button>
+    </div>
+  </div>
+
+  <div class="grid g4" style="margin-bottom:14px">
+    <div class="stat"><div class="lab">实例</div><div class="val">${esc(wl.ready)}</div>
+      <div class="foot">${pods.filter(p => p.phase === 'Running').length} 个 Running · ${pods.length} 个实例</div></div>
+    <div class="stat"><div class="lab">重启次数</div><div class="val" style="${wl.restarts ? 'color:var(--warning)' : ''}">${wl.restarts}</div>
+      <div class="foot">运行时长 ${esc(wl.age)}</div></div>
+    <div class="stat"><div class="lab">CPU</div><div class="val">${fmtQty(cpuCur)}<small>/ ${fmtQty(cpuCap)}c</small></div>
+      <div class="foot"><div class="progress thin" style="width:100%"><div style="width:${Math.min(100, cpuCur / cpuCap * 100)}%;background:${cpuCur / cpuCap > 0.8 ? 'var(--warning)' : 'var(--primary)'}"></div></div></div></div>
+    <div class="stat"><div class="lab">内存</div><div class="val">${fmtQty(memCur)}<small>/ ${fmtQty(memCap)}Gi</small></div>
+      <div class="foot"><div class="progress thin" style="width:100%"><div style="width:${Math.min(100, memCur / memCap * 100)}%;background:${memCur / memCap > 0.8 ? 'var(--warning)' : 'var(--success)'}"></div></div></div></div>
+  </div>
+
+  <div class="card">
+    <div class="tabs wl-tabs">
+      ${tabs.map(([k, n]) => `<div class="tab ${S.wlTab === k ? 'on' : ''}" onclick="wlGo('${k}')">${n}</div>`).join('')}
+    </div>
+    ${wlTabBody(app, comp, wl, pods)}
+  </div>`;
+}
+function wlGo(k) {
+  S.wlTab = k;
+  if (k === 'logs') ensureLogs(curWl());
+  route();
+}
+function wlOpen(appId, comp, name, tab) {
+  const key = `${appId}/${comp}/${name}`;
+  if (S.wlKey === key) S.wlTab = tab || 'overview';
+  else S.wlPending = tab || 'overview';
+  goto(wlUrl(appId, comp, name));
+}
+function curWl() {
+  const p = location.hash.replace(/^#/, '').split('/').filter(Boolean);
+  const app = DB.apps.find(a => a.id === decodeURIComponent(p[1] || ''));
+  const comp = app && app.components.find(c => c.name === decodeURIComponent(p[2] || ''));
+  return comp && comp.workloads.find(w => w.name === decodeURIComponent(p[3] || ''));
+}
+function wlTabBody(app, comp, wl, pods) {
+  if (S.wlTab === 'metrics') return wlMetricsView(wl);
+  if (S.wlTab === 'logs') return wlLogsView(wl);
+  if (S.wlTab === 'events') return wlEventsView(wl, comp);
+  if (S.wlTab === 'yaml') return wlYamlView(app, comp, wl);
+  if (S.wlTab === 'terminal') return wlTerminalView(wl);
+  return wlOverviewView(app, comp, wl, pods);
+}
+
+function wlOverviewView(app, comp, wl, pods) {
+  const m = wlMetrics(wl, '1h');
+  const ev = eventsFor(wl, comp).slice(-3).reverse();
+  const inject = wl.mesh === '已注入' && S.modules.mesh;
+  return `
+  <div class="card-body" style="padding:14px 16px 6px">
+    <div class="grid g2" style="gap:14px">
+      ${chartCard('CPU 使用', '近 1 小时 · 单位核心', m.cpu, { unit: 'c', color: '#2563eb', labels: axisLabels('1h'), span: 60, fmt: v => fmtQty(v) })}
+      ${chartCard('内存占用', '近 1 小时 · 单位 GiB', m.mem, { unit: 'GiB', color: '#0d9488', labels: axisLabels('1h'), span: 60, fmt: v => fmtQty(v) })}
+    </div>
+  </div>
+
+  <div class="card-body tight" style="border-top:1px solid var(--border)">
+    <div style="padding:13px 16px 9px;display:flex;align-items:center;gap:8px">
+      <div style="font-size:12.5px;font-weight:650">实例</div>
+      <span class="chip">${pods.length}</span>
+      <span class="tiny muted" style="margin-left:auto">节点名与 IP 为调度结果，重启次数含历史累计</span>
+    </div>
+    ${pods.length ? `<div style="overflow-x:auto"><table class="table">
+      <thead><tr><th>Pod</th><th>状态</th><th>就绪</th><th>重启</th><th>节点</th><th>IP</th><th>CPU</th><th>内存</th><th class="right">运行时长</th></tr></thead>
+      <tbody>${pods.map(p => `<tr>
+        <td class="name mono" style="font-size:11px">${esc(p.name)}</td>
+        <td>${p.phase === 'Running' ? '<span class="badge ok"><i></i>Running</span>' : `<span class="badge bad">${esc(p.phase)}</span>`}</td>
+        <td class="num">${esc(p.ready)}</td>
+        <td class="num" style="${p.restarts ? 'color:var(--warning);font-weight:600' : ''}">${p.restarts}</td>
+        <td class="mono" style="font-size:11px">${esc(p.node)}</td>
+        <td class="mono" style="font-size:11px">${esc(p.ip)}</td>
+        <td class="num">${p.cpu}c</td>
+        <td class="num">${p.mem}Gi</td>
+        <td class="right mono" style="font-size:11px">${esc(p.age)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>` : `<div class="empty" style="padding:26px 16px">
+      <p style="margin:0">该工作负载按计划触发，不保留常驻实例；每次运行会创建一个临时 Pod。</p>
+    </div>`}
+  </div>
+
+  <div class="grid g3" style="gap:0;border-top:1px solid var(--border)">
+    <div style="padding:14px 16px;border-right:1px solid var(--border)">
+      <div class="tiny muted" style="margin-bottom:9px">容器</div>
+      <dl class="kv" style="grid-template-columns:70px 1fr">
+        <dt>名称</dt><dd class="mono" style="font-size:11px">${esc(wl.name)}</dd>
+        <dt>镜像</dt><dd class="mono" style="font-size:11px;word-break:break-all">${esc(imgRef(comp, wl))}</dd>
+        <dt>端口</dt><dd class="mono" style="font-size:11px">8080/TCP · http</dd>
+        <dt>拉取策略</dt><dd>IfNotPresent</dd>
+        ${inject ? `<dt>Sidecar</dt><dd>istio-proxy 1.29 · mTLS strict</dd>` : ''}
+      </dl>
+    </div>
+    <div style="padding:14px 16px;border-right:1px solid var(--border)">
+      <div class="tiny muted" style="margin-bottom:9px">探针与策略</div>
+      <dl class="kv" style="grid-template-columns:70px 1fr">
+        <dt>存活探针</dt><dd class="mono" style="font-size:11px">GET /healthz :8080 · 10s</dd>
+        <dt>就绪探针</dt><dd class="mono" style="font-size:11px">GET /readyz :8080 · 5s</dd>
+        <dt>更新策略</dt><dd>RollingUpdate · 25% / 0</dd>
+        <dt>调度位置</dt><dd>${whereChip(wl.where)} <span class="mono muted" style="font-size:10.5px">${esc(wl.cluster)}</span></dd>
+      </dl>
+    </div>
+    <div style="padding:14px 16px">
+      <div class="tiny muted" style="margin-bottom:9px">最近事件</div>
+      ${ev.map(e => `<div style="display:flex;gap:7px;margin-bottom:7px;font-size:11.5px">
+        <span class="badge ${e.type === 'Warning' ? 'warn' : 'muted'}" style="flex:none">${e.reason}</span>
+        <span style="color:var(--text-2);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.45">${esc(e.msg)}</span>
+      </div>`).join('')}
+      <div class="link tiny" onclick="wlGo('events')">查看全部事件 →</div>
+    </div>
+  </div>`;
+}
+
+function wlMetricsView(wl) {
+  const range = S.wlRange;
+  const m = wlMetrics(wl, range);
+  const labels = axisLabels(range);
+  const span = range === '15m' ? 15 : range === '6h' ? 360 : 60;
+  const { cur: cpuCur, cap: cpuCap } = parseRes(wl.cpu, 'cpu');
+  const { cur: memCur, cap: memCap } = parseRes(wl.mem, 'mem');
+  return `
+  <div class="toolbar">
+    <div class="seg">
+      ${[['15m', '15 分钟'], ['1h', '1 小时'], ['6h', '6 小时']].map(([k, n]) =>
+        `<button class="${range === k ? 'on' : ''}" onclick="wlSetRange('${k}')">${n}</button>`).join('')}
+    </div>
+    <span class="tiny muted">采样 15s · 数据来自 Prometheus（原型模拟）</span>
+    <div class="grow"><button class="btn sm" onclick="toast('已刷新指标')">${icon('refresh', '', 12)}刷新</button></div>
+  </div>
+  <div class="card-body" style="padding:14px 16px">
+    <div class="grid g2" style="gap:16px">
+      ${chartCard('CPU 使用', `${fmtQty(cpuCap)}c 上限 · 当前 ${fmtQty(cpuCur)}c`, m.cpu, { unit: 'c', color: '#2563eb', labels, span, fmt: v => fmtQty(v) })}
+      ${chartCard('内存占用', `${fmtQty(memCap)}Gi 上限 · 当前 ${fmtQty(memCur)}Gi`, m.mem, { unit: 'GiB', color: '#0d9488', labels, span, fmt: v => fmtQty(v) })}
+      ${chartCard('P99 响应延迟', '按入口请求统计', m.rt, { unit: 'ms', color: '#c2760a', labels, span, fmt: v => Math.round(v) })}
+      ${chartCard('请求速率', '每秒请求数', m.qps, { unit: 'req/s', color: '#7c3aed', labels, span, fmt: v => Math.round(v) })}
+    </div>
+    <div class="sd-note" style="margin-top:6px">悬停任意曲线可查看该时刻的读数。指标仅覆盖当前工作负载实例，不含 Sidecar 自身开销。</div>
+  </div>`;
+}
+function wlSetRange(k) { S.wlRange = k; route(); }
+
+function wlLogsView(wl) {
+  const L = S.logs;
+  ensureLogs(wl);
+  const containers = [wl.name, ...(wl.mesh === '已注入' && S.modules.mesh ? ['istio-proxy'] : [])];
+  return `
+  <div class="toolbar log-toolbar">
+    <select class="input" style="width:160px;height:30px;padding:0 8px;font-size:12px" onchange="logSet('container', this.value)">
+      ${containers.map(c => `<option value="${esc(c)}"${L.container === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+    </select>
+    ${['all', 'ERROR', 'WARN', 'INFO', 'DEBUG'].map(k =>
+      `<button class="filter-pill ${L.level === k ? 'on' : ''}" onclick="logSet('level','${k}')">${k === 'all' ? '全部' : k}</button>`).join('')}
+    <div class="search" style="margin:0;width:190px">${icon('search', '', 13)}
+      <input placeholder="过滤关键字" value="${esc(L.q)}" oninput="logSet('q', this.value, true)" />
+    </div>
+    <div class="grow">
+      <button class="btn sm ${L.paused ? 'primary' : ''}" onclick="logTogglePause()">${L.paused ? '继续跟随' : '暂停'}</button>
+      <button class="btn sm" onclick="logClear()">清空</button>
+      <span class="tiny muted" style="align-self:center" id="logmeta">${L.lines.length} 行</span>
+    </div>
+  </div>
+  <div class="logview" id="logview">${logRows()}</div>
+  <div class="logfoot">
+    <span class="dot-live ${L.paused ? 'off' : ''}"></span>${L.paused ? '已暂停，新日志仍在接收' : '实时跟随中'}
+    <span style="margin-left:auto" class="mono">kubectl logs -f ${esc(wl.name)}</span>
+  </div>`;
+}
+function ensureLogs(wl) {
+  if (!wl) return;
+  const key = wl.name + '|' + wl.image;
+  if (S.logs.key === key && S.logs.lines.length) return;
+  S.logs.key = key;
+  S.logs.lines = seedLogs(wl, 60);
+  S.logs.paused = false;
+  S.logs.q = '';
+  S.logs.level = 'all';
+  S.logs.container = wl.name;
+  S.logs.pending = 0;
+}
+function logMatch(l) {
+  const L = S.logs;
+  if (L.level !== 'all' && l.level !== L.level) return false;
+  if (L.q && !l.msg.toLowerCase().includes(L.q.toLowerCase())) return false;
+  return true;
+}
+function logRows() {
+  const L = S.logs;
+  const list = L.lines.filter(logMatch);
+  if (!list.length) return `<div class="log-empty">没有匹配的日志行</div>`;
+  return list.map(l => {
+    let msg = esc(l.msg);
+    if (L.q) {
+      const re = new RegExp(`(${L.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+      msg = msg.replace(re, '<mark>$1</mark>');
+    }
+    return `<div class="ln ${l.level}"><span class="lt">${stamp(l.t)}</span><span class="ll">${l.level}</span><span class="lm">${msg}</span></div>`;
+  }).join('');
+}
+function logSet(k, v, typing) {
+  S.logs[k] = v;
+  if (k === 'level' || k === 'container') route();
+  else paintLogs();
+}
+function paintLogs() {
+  const el = $('#logview');
+  if (!el) return;
+  el.innerHTML = logRows();
+  if (S.logs.follow !== false) el.scrollTop = el.scrollHeight;
+  const meta = $('#logmeta');
+  if (meta) meta.textContent = `${S.logs.lines.filter(logMatch).length} / ${S.logs.lines.length} 行`;
+}
+function logTogglePause() {
+  S.logs.paused = !S.logs.paused;
+  if (!S.logs.paused) S.logs.pending = 0;
+  route();
+}
+function logClear() {
+  S.logs.lines = [];
+  paintLogs();
+  toast('日志视图已清空（仅影响当前会话）');
+}
+
+function wlEventsView(wl, comp) {
+  const ev = eventsFor(wl, comp).reverse();
+  return `
+  <div class="toolbar">
+    <span class="badge warn">${ev.filter(e => e.type === 'Warning').length} 条 Warning</span>
+    <span class="badge muted">${ev.filter(e => e.type === 'Normal').length} 条 Normal</span>
+    <span class="tiny muted">保留 1 小时 · 相同原因会聚合计数</span>
+    <div class="grow"><button class="btn sm" onclick="toast('已刷新事件')">${icon('refresh', '', 12)}刷新</button></div>
+  </div>
+  <table class="table">
+    <thead><tr><th>类型</th><th>原因</th><th>消息</th><th class="right">次数</th><th>最近发生</th></tr></thead>
+    <tbody>${ev.map(e => `<tr>
+      <td>${e.type === 'Warning' ? '<span class="badge warn">Warning</span>' : '<span class="badge muted">Normal</span>'}</td>
+      <td class="name">${esc(e.reason)}</td>
+      <td class="mono" style="font-size:11px;color:var(--text-2);max-width:620px">${esc(e.msg)}</td>
+      <td class="right num">${e.count}</td>
+      <td class="tiny muted">${esc(e.age)}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+function wlYamlView(app, comp, wl) {
+  const lines = yamlFor(app, comp, wl);
+  const showDiff = S.yamlDiff;
+  const ops = showDiff ? diffLines(lines, yamlDrift(lines)) : null;
+  const body = showDiff
+    ? ops.map(([k, l]) => `<div class="yl ${k === '+' ? 'add' : k === '-' ? 'del' : ''}">
+        <span class="yn">${k === '+' ? '+' : k === '-' ? '-' : ''}</span>
+        <code>${hlYaml(l)}</code></div>`).join('')
+    : lines.map((l, i) => `<div class="yl"><span class="yn">${i + 1}</span><code>${hlYaml(l)}</code></div>`).join('');
+  return `
+  <div class="toolbar">
+    <span class="chip blue">${esc(wl.kind)}</span>
+    <span class="tiny muted">声明式配置 · 与集群内实际对象保持同步</span>
+    <div class="grow">
+      <button class="btn sm" onclick="S.yamlDiff=${showDiff ? 'false' : 'true'};route()">${showDiff ? '退出对比' : '与运行态对比'}</button>
+      <button class="btn sm" onclick="toast('YAML 已复制到剪贴板','ok')">${icon('copy', '', 12)}复制</button>
+    </div>
+  </div>
+  ${showDiff ? `<div class="diff-legend"><span class="add">+ 线上多出的行</span><span class="del">- 仓库声明但线上缺失</span><span>对比基准：上一次发布提交的清单</span></div>` : ''}
+  <div class="yaml"><div class="ylines">${body}</div></div>`;
+}
+
+function wlTerminalView(wl) {
+  if (S.termKey !== wl.name) {
+    S.termKey = wl.name;
+    S.term = termWelcome(wl);
+  }
+  return `
+  <div class="term">
+    <div class="term-bar"><i></i><i></i><i></i><span>${esc(wl.name)} · /bin/sh · ${esc(wl.cluster)}</span></div>
+    <div class="term-body" id="termbody">
+      ${S.term.map(l => `<div class="tl ${l.k}">${esc(l.v)}</div>`).join('')}
+    </div>
+    <form class="term-in" onsubmit="termSubmit(event)">
+      <span>$</span><input id="terminput" autocomplete="off" spellcheck="false" placeholder="输入命令，help 查看可用命令" />
+    </form>
+  </div>`;
+}
+function termSubmit(e) {
+  e.preventDefault();
+  const inp = $('#terminput');
+  const cmd = inp.value;
+  inp.value = '';
+  const wl = curWl();
+  const res = termRun(wl, cmd);
+  if (res === 'clear') S.term = [];
+  else S.term.push(...res);
+  const body = $('#termbody');
+  if (body) {
+    body.innerHTML = S.term.map(l => `<div class="tl ${l.k}">${esc(l.v)}</div>`).join('');
+    body.scrollTop = body.scrollHeight;
+  }
+  inp.focus();
+}
+function wlRestart(appId, comp, name) {
+  const app = DB.apps.find(a => a.id === appId);
+  const c = app && app.components.find(x => x.name === comp);
+  const w = c && c.workloads.find(x => x.name === name);
+  if (!w) return;
+  w.restarts = (w.restarts || 0) + 0;
+  w.status = '运行中';
+  saveSnapshot();
+  toast('已触发滚动重启，实例将逐个替换', 'ok');
+  route();
+}
+
+/* 详情页渲染后的挂载：图表悬停、日志跟随 */
+let LOG_TIMER = null;
+function mountWorkload() {
+  if (LOG_TIMER) { clearInterval(LOG_TIMER); LOG_TIMER = null; }
+  document.querySelectorAll('.chart').forEach(bindChart);
+  if (S.wlTab !== 'logs') return;
+  paintLogs();
+  LOG_TIMER = setInterval(() => {
+    if (!S.logs.lines.length && S.logs.paused) return;
+    const wl = curWl();
+    if (!wl) return;
+    const r = mulberry32(Date.now() & 0xffff);
+    S.logs.lines.push(mkLog(wl, r, Date.now()));
+    if (S.logs.lines.length > 400) S.logs.lines.splice(0, S.logs.lines.length - 400);
+    if (S.logs.paused) { S.logs.pending++; if (S.logs.pending === 1) paintLogs(); return; }
+    paintLogs();
+  }, 1500);
+}
+function bindChart(el) {
+  const vals = JSON.parse(el.dataset.vals || '[]');
+  if (!vals.length) return;
+  const svg = el.querySelector('svg');
+  const hl = el.querySelector('.hl'), hd = el.querySelector('.hd');
+  const tip = el.querySelector('.chart-tip');
+  const unit = el.dataset.unit || '';
+  const span = +el.dataset.span || 60;
+  const W = 600, H = 110;
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const pad = (max - min) * 0.2 || Math.abs(max * 0.1) || 1;
+  const lo = Math.max(0, min - pad), hi = max + pad;
+  el.onmousemove = e => {
+    const rect = el.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const i = Math.round(frac * (vals.length - 1));
+    const v = vals[i];
+    const x = (i / (vals.length - 1)) * W;
+    const y = H - ((v - lo) / (hi - lo)) * H;
+    hl.setAttribute('x1', x); hl.setAttribute('x2', x); hl.setAttribute('opacity', '.9');
+    hd.setAttribute('cx', x); hd.setAttribute('cy', y); hd.setAttribute('opacity', '1');
+    const pct = i / (vals.length - 1);
+    const mins = Math.round(span * (1 - pct));
+    const rel = mins <= 0 ? '现在' : mins >= 120 ? `-${(mins / 60).toFixed(1)}h` : `-${mins}m`;
+    tip.innerHTML = `<b>${v}${unit}</b><span>${rel}</span>`;
+    tip.style.left = Math.min(rect.width - 76, Math.max(6, frac * rect.width - 38)) + 'px';
+    tip.classList.add('on');
+  };
+  el.onmouseleave = () => {
+    hl.setAttribute('opacity', '0'); hd.setAttribute('opacity', '0');
+    tip.classList.remove('on');
+  };
 }
 
 /* ---------- 流水线列表 ---------- */
@@ -2628,6 +3522,7 @@ function viewDesign() {
           ['全局入口视图', '应用管理 → 访问入口，跨应用汇总所有对外地址', '/access'],
           ['流水线阶段', '选择一条运行中的流水线查看阶段流程与实时日志', '/cicd/pl-order'],
           ['跨端调度视图', '工作负载页按「边缘 / 端侧」筛选', '/workloads'],
+          ['工作负载运行时', '工作负载 → 详情，看指标曲线、实时日志、YAML 与终端', '/workloads/retail-platform/order-service/order-service-api'],
           ['服务拓扑', 'Service Mesh → 服务拓扑，查看调用关系与异常链路', '/mesh/topology'],
           ['链路追踪', 'Service Mesh → 链路追踪，点开慢链路看瀑布图与耗时分布', '/mesh/tracing']
         ].map(([t, d, r]) => `
@@ -3103,6 +3998,8 @@ function route() {
   if (seg[0] === 'overview' || seg.length === 0) html = viewOverview();
   else if (seg[0] === 'apps' && seg[1]) { S.appTab = seg[2] || 'components'; html = viewAppDetail(seg[1]); }
   else if (seg[0] === 'apps') html = viewApps();
+  else if (seg[0] === 'workloads' && seg[1]) html = viewWorkloadDetail(
+    decodeURIComponent(seg[1]), decodeURIComponent(seg[2] || ''), decodeURIComponent(seg[3] || ''));
   else if (seg[0] === 'workloads') html = viewWorkloads();
   else if (seg[0] === 'access') html = viewAccessList();
   else if (seg[0] === 'cicd' && seg[1]) html = viewPipeline(seg[1]);
@@ -3125,6 +4022,8 @@ function route() {
 
   $('#view').innerHTML = html;
   renderSidebar();
+  if (LOG_TIMER) { clearInterval(LOG_TIMER); LOG_TIMER = null; }
+  if (seg[0] === 'workloads' && seg[1]) mountWorkload();
   window.scrollTo({ top: 0 });
 }
 
