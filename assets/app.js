@@ -39,6 +39,8 @@ const S = {
   cfgShown: {},
   ruleQ: '',
   ruleType: 'all',
+  ioShown: {},
+  storeQ: '',
   yamlDiff: false,
   logs: { key: '', lines: [], level: 'all', q: '', container: '', paused: false, pending: 0, follow: true },
   term: [],
@@ -172,7 +174,8 @@ const STK = {
   '未处理': 'bad', '失败': 'bad', '离线': 'bad', '已停止': 'bad', '严重': 'bad',
   '警告': 'warn', '提示': 'muted', 'P0': 'bad', 'P1': 'warn', 'P2': 'muted',
   '正常': 'ok', '慢调用': 'warn', '错误': 'bad', '超时': 'bad',
-  '待激活': 'warn', '接入中': 'info', '已封锁': 'muted'
+  '待激活': 'warn', '接入中': 'info', '已封锁': 'muted',
+  '已绑定': 'ok', '未绑定': 'warn'
 };
 function badge(t, k) { return `<span class="badge ${k || STK[t] || 'muted'}">${t === '运行中' || t === '健康' || t === '在线' ? '<i></i>' : ''}${esc(t)}</span>`; }
 function pbadge(t) {
@@ -250,6 +253,7 @@ const NAV = [
   {
     label: '运维中心', items: [
       { label: '集群管理', icon: 'server', route: '/ops/clusters' },
+      { label: '存储', icon: 'archive', route: '/storage' },
       { label: '告警中心', icon: 'bell', route: '/ops/alerts' }
     ]
   },
@@ -562,6 +566,9 @@ function fSelect(k, opts, value, attrs = '') {
     const v = Array.isArray(o) ? o[0] : o, n = Array.isArray(o) ? o[1] : o;
     return `<option value="${esc(v)}"${String(v) === String(value) ? ' selected' : ''}>${esc(n)}</option>`;
   }).join('')}</select>`;
+}
+function fArea(k, value = '', ph = '', rows = 3) {
+  return `<textarea class="input" data-k="${k}" rows="${rows}" placeholder="${esc(ph)}">${esc(value)}</textarea>`;
 }
 function fCheck(k, title, checked, hint = '', toggleId = '') {
   return `<label class="check">
@@ -2197,11 +2204,6 @@ function eventsFor(w, comp) {
 
 /* ---------- YAML ---------- */
 /* 配置项 → 环境变量片段；密钥走 secretKeyRef */
-function cfgYamlEnv(cfg, ind) {
-  return (cfg || []).flatMap(c => c.secret
-    ? [`${ind}- name: ${c.key}`, `${ind}  valueFrom:`, `${ind}    secretKeyRef:`, `${ind}      name: app-secrets`, `${ind}      key: ${c.key}`]
-    : [`${ind}- name: ${c.key}`, `${ind}  value: "${c.value}"`]);
-}
 function yamlFor(app, comp, w) {
   if (w.kind === 'CronJob') return cronYaml(app, comp, w);
   const { cur: cpuCur, cap: cpuCap } = parseRes(w.cpu, 'cpu');
@@ -2260,7 +2262,7 @@ function yamlFor(app, comp, w) {
     '              value: prod',
     '            - name: OTEL_EXPORTER_OTLP_ENDPOINT',
     '              value: http://otel-collector.observability:4317',
-    ...cfgYamlEnv(configOf(app, comp.name), '            '),
+    ...envYamlLines(effectiveEnv(app, comp, w), '            '),
     '          livenessProbe:',
     '            httpGet:',
     `              path: ${comp.healthPath}`,
@@ -2271,20 +2273,28 @@ function yamlFor(app, comp, w) {
     '            httpGet:',
     `              path: ${comp.readyPath}`,
     `              port: ${comp.port}`,
-    '            periodSeconds: 5'
+    '            periodSeconds: 5',
+    ...ioMountLines(app, comp, w, '          ')
   ];
+  base.push(...ioVolumeLines(app, comp, w, '      '));
   const kind = String(base[1] || '').replace('kind: ', '');
   if (kind === 'StatefulSet') {
     const i = base.indexOf('  selector:');
     base.splice(i, 0, `  serviceName: ${w.name}-headless`, '  podManagementPolicy: OrderedReady');
-    base.push('  volumeClaimTemplates:');
-    base.push('    - metadata:');
-    base.push('        name: data');
-    base.push('      spec:');
-    base.push('        accessModes: ["ReadWriteOnce"]');
-    base.push('        resources:');
-    base.push('          requests:');
-    base.push(`            storage: 100Gi`);
+    const claims = (w.volumes || []).filter(v => v.type === 'pvc');
+    if (claims.length) {
+      base.push('  volumeClaimTemplates:');
+      claims.forEach(v => base.push(...[
+        '    - metadata:',
+        `        name: ${v.name}`,
+        '      spec:',
+        `        accessModes: ["${v.mode || 'ReadWriteOnce'}"]`,
+        v.sc ? `        storageClassName: ${v.sc}` : null,
+        '        resources:',
+        '          requests:',
+        `            storage: ${v.size}`
+      ].filter(Boolean)));
+    }
   }
   if (kind === 'EdgeApp') {
     base[0] = 'apiVersion: edge.platform.io/v1alpha1';
@@ -2302,7 +2312,7 @@ function yamlFor(app, comp, w) {
 function cronYaml(app, comp, w) {
   const { cur: cpuCur, cap: cpuCap } = parseRes(w.cpu, 'cpu');
   const { cur: memCur, cap: memCap } = parseRes(w.mem, 'mem');
-  return [
+  const lines = [
     'apiVersion: batch/v1',
     'kind: CronJob',
     'metadata:',
@@ -2341,10 +2351,9 @@ function cronYaml(app, comp, w) {
     '              env:',
     '                - name: APP_ENV',
     '                  value: prod',
-    '                - name: JOB_DRY_RUN',
-    '                  value: "false"',
-    ...cfgYamlEnv(configOf(app, comp.name), '                ')
+    ...envYamlLines(effectiveEnv(app, comp, w), '                ')
   ];
+  return lines.concat(ioMountLines(app, comp, w, '                '), ioVolumeLines(app, comp, w, '          '));
 }
 function yamlDrift(lines) {
   // 线上运行态与仓库声明的差异：副本被手工扩过、镜像带 hotfix、多了一个调试环境变量
@@ -2467,7 +2476,7 @@ function viewWorkloadDetail(appId, compName, wlName) {
     S.yamlDiff = false;
   }
 
-  const tabs = [['overview', '概览'], ['metrics', '指标'], ['logs', '日志'], ['events', '事件'], ['yaml', 'YAML'], ['terminal', '终端']];
+  const tabs = [['overview', '概览'], ['metrics', '指标'], ['logs', '日志'], ['events', '事件'], ['io', '配置与存储'], ['yaml', 'YAML'], ['terminal', '终端']];
   const { cur: cpuCur, cap: cpuCap } = parseRes(wl.cpu, 'cpu');
   const { cur: memCur, cap: memCap } = parseRes(wl.mem, 'mem');
   const pods = podsFor(wl);
@@ -2532,6 +2541,7 @@ function wlTabBody(app, comp, wl, pods) {
   if (S.wlTab === 'metrics') return wlMetricsView(wl);
   if (S.wlTab === 'logs') return wlLogsView(wl);
   if (S.wlTab === 'events') return wlEventsView(wl, comp);
+  if (S.wlTab === 'io') return wlIOView(app, comp, wl);
   if (S.wlTab === 'yaml') return wlYamlView(app, comp, wl);
   if (S.wlTab === 'terminal') return wlTerminalView(wl);
   return wlOverviewView(app, comp, wl, pods);
@@ -2857,6 +2867,420 @@ function bindChart(el) {
 /* ==========================================================
    配置与密钥：应用级存储，作用域可落到组件
    ========================================================== */
+/* ==========================================================
+   配置 / 密钥 / 存储
+   ----------------------------------------------------------
+   配置项（ConfigMap）与密钥（Secret）建在应用级，按作用域生效；
+   挂载方式有两种：环境变量（env）与文件挂载（file，按目录挂成卷）。
+   存储卷建在工作负载级：持久卷（PVC）与临时卷（emptyDir）。
+   ========================================================== */
+const SC_DEFS = [
+  { name: 'standard-ssd', provider: '阿里云 ESSD', reclaim: 'Delete', binding: 'WaitForFirstConsumer', desc: '通用 SSD，默认存储类' },
+  { name: 'ceph-rbd', provider: 'Ceph RBD', reclaim: 'Retain', binding: 'Immediate', desc: '块存储，支持多挂载（ReadWriteMany）' },
+  { name: 'local-path', provider: '节点本地盘', reclaim: 'Delete', binding: 'WaitForFirstConsumer', desc: '边缘场景默认，随节点漂移重建' }
+];
+const VOL_TYPES = [['pvc', '持久卷 PVC'], ['emptyDir', '临时卷 emptyDir']];
+const ACCESS_MODES = ['ReadWriteOnce', 'ReadOnlyMany', 'ReadWriteMany'];
+
+/* 历史数据补齐：配置项的挂载方式、工作负载的自有变量与存储卷 */
+function normalizeIO() {
+  Object.keys(DB.config || {}).forEach(k => {
+    DB.config[k].forEach(c => {
+      if (!c.mount) c.mount = 'env';
+      if (c.mount === 'file' && !c.path) c.path = c.secret ? '/etc/app/secrets' : '/etc/app/conf';
+    });
+  });
+  DB.apps.forEach(a => a.components.forEach(c => c.workloads.forEach(w => {
+    if (!Array.isArray(w.env)) {
+      w.env = [];
+      if (w.kind === 'EdgeApp') w.env = [{ key: 'EDGE_SYNC_INTERVAL', value: '30' }, { key: 'MODEL_DIR', value: '/models' }];
+      else if (w.kind === 'CronJob') w.env = [{ key: 'JOB_DRY_RUN', value: 'false' }];
+      else if (w.kind === 'StatefulSet') w.env = [{ key: 'TZ', value: 'Asia/Shanghai' }];
+      else if (/order-service/.test(w.name)) w.env = [{ key: 'JAVA_TOOL_OPTIONS', value: '-XX:MaxRAMPercentage=75' }];
+      else if (w.mesh === '已注入') w.env = [{ key: 'TZ', value: 'Asia/Shanghai' }];
+    }
+    if (!Array.isArray(w.volumes)) {
+      if (w.kind === 'StatefulSet') w.volumes = [{ name: 'data', type: 'pvc', size: '100Gi', sc: 'standard-ssd', mode: 'ReadWriteOnce', mount: '/var/lib/mysql' }];
+      else if (w.kind === 'EdgeApp') w.volumes = [{ name: 'cache', type: 'pvc', size: '20Gi', sc: 'local-path', mode: 'ReadWriteOnce', mount: '/models' }, { name: 'tmp', type: 'emptyDir', size: '2Gi', mount: '/tmp' }];
+      else if (w.kind === 'CronJob') w.volumes = [{ name: 'tmp', type: 'emptyDir', size: '2Gi', mount: '/tmp' }];
+      else if (/order-service-api/.test(w.name)) w.volumes = [{ name: 'logs', type: 'pvc', size: '50Gi', sc: 'standard-ssd', mode: 'ReadWriteOnce', mount: '/var/log/app' }, { name: 'tmp', type: 'emptyDir', size: '1Gi', mount: '/tmp' }];
+      else w.volumes = [{ name: 'tmp', type: 'emptyDir', size: '1Gi', mount: '/tmp' }];
+    }
+  })));
+}
+
+/* 当前工作负载实际生效的环境变量：应用配置（同作用域）在前，工作负载自有覆盖同名项 */
+function effectiveEnv(app, comp, w) {
+  const out = new Map();
+  configOf(app, comp.name).filter(c => (c.mount || 'env') === 'env')
+    .forEach(c => out.set(c.key, { key: c.key, value: c.value, secret: !!c.secret, from: 'app', scope: c.scope }));
+  (w.env || []).forEach(e => out.set(e.key, { key: e.key, value: e.value, secret: false, from: 'wl' }));
+  return [...out.values()];
+}
+function envYamlLines(list, ind) {
+  return list.flatMap(e => e.secret
+    ? [`${ind}- name: ${e.key}`, `${ind}  valueFrom:`, `${ind}    secretKeyRef:`, `${ind}      name: app-secrets`, `${ind}      key: ${e.key}`]
+    : [`${ind}- name: ${e.key}`, `${ind}  value: "${String(e.value).replace(/"/g, '\\"')}"`]);
+}
+
+/* 工作负载的卷：自有存储卷 + 应用配置里以文件方式挂载的项（按目录合并成 ConfigMap / Secret 卷） */
+function ioVolumes(app, comp, w) {
+  const out = (w.volumes || []).map(v => ({ ...v }));
+  const files = configOf(app, comp.name).filter(c => c.mount === 'file');
+  const byPath = new Map();
+  files.forEach(c => {
+    const p = c.path || '/etc/app/conf';
+    if (!byPath.has(p)) byPath.set(p, []);
+    byPath.get(p).push(c);
+  });
+  let ci = 0, si = 0;
+  [...byPath.entries()].forEach(([path, items]) => {
+    const plains = items.filter(i => !i.secret);
+    const secrets = items.filter(i => i.secret);
+    if (plains.length) {
+      ci++;
+      out.push({ name: `app-config-${ci}`, type: 'configMap', mount: path, readOnly: true, items: plains.map(i => i.key), source: `${app.id}-config` });
+    }
+    if (secrets.length) {
+      si++;
+      out.push({ name: `app-secret-${si}`, type: 'secret', mount: path, readOnly: true, items: secrets.map(i => i.key), source: 'app-secrets' });
+    }
+  });
+  return out;
+}
+function pvcName(w, v) { return `${w.name}-${v.name}`; }
+function ioMountLines(app, comp, w, ind) {
+  const vols = ioVolumes(app, comp, w);
+  if (!vols.length) return [];
+  const out = [`${ind}volumeMounts:`];
+  vols.forEach(v => {
+    out.push(`${ind}  - name: ${v.name}`);
+    out.push(`${ind}    mountPath: ${v.mount}`);
+    if (v.readOnly || v.type === 'configMap' || v.type === 'secret') out.push(`${ind}    readOnly: true`);
+  });
+  return out;
+}
+function ioVolumeLines(app, comp, w, ind) {
+  const vols = ioVolumes(app, comp, w).filter(v => !(v.type === 'pvc' && w.kind === 'StatefulSet'));
+  if (!vols.length) return [];
+  const out = [`${ind}volumes:`];
+  vols.forEach(v => {
+    out.push(`${ind}  - name: ${v.name}`);
+    if (v.type === 'pvc') {
+      out.push(`${ind}    persistentVolumeClaim:`, `${ind}      claimName: ${pvcName(w, v)}`);
+    } else if (v.type === 'emptyDir') {
+      out.push(`${ind}    emptyDir:`);
+      if (v.size) out.push(`${ind}      sizeLimit: ${v.size}`);
+    } else if (v.type === 'configMap') {
+      out.push(`${ind}    configMap:`, `${ind}      name: ${v.source}`, `${ind}      items:`);
+      v.items.forEach(k => out.push(`${ind}        - key: ${k}`, `${ind}          path: ${k}`));
+    } else if (v.type === 'secret') {
+      out.push(`${ind}    secret:`, `${ind}      secretName: ${v.source}`, `${ind}      items:`);
+      v.items.forEach(k => out.push(`${ind}        - key: ${k}`, `${ind}          path: ${k}`));
+    }
+  });
+  return out;
+}
+
+/* ---------- 工作负载：配置与存储页签 ---------- */
+function ioWl() {
+  const p = location.hash.replace(/^#/, '').split('/').filter(Boolean);
+  const app = DB.apps.find(a => a.id === decodeURIComponent(p[1] || ''));
+  const comp = app && app.components.find(c => c.name === decodeURIComponent(p[2] || ''));
+  const w = comp && comp.workloads.find(x => x.name === decodeURIComponent(p[3] || ''));
+  return { app, comp, w };
+}
+function wlIOView(app, comp, wl) {
+  const env = effectiveEnv(app, comp, wl);
+  const own = wl.env || [];
+  const vols = ioVolumes(app, comp, wl);
+  const files = configOf(app, comp.name).filter(c => c.mount === 'file');
+  return `
+  <div class="card" style="box-shadow:none;margin-bottom:14px">
+    <div class="card-head">
+      <div class="t">环境变量</div>
+      <div class="r">
+        <span class="tiny muted">${env.length} 个生效 · 其中 ${own.length} 个工作负载自有</span>
+        <button class="btn sm primary" onclick="wlEnvNew()">${icon('plus', '', 12)}新增变量</button>
+      </div>
+    </div>
+    <table class="table">
+      <thead><tr><th style="width:26%">Key</th><th style="width:26%">值</th><th style="width:14%">来源</th><th style="width:14%">生效范围</th><th>已注入</th><th class="right" style="width:16%">操作</th></tr></thead>
+      <tbody>${env.length ? env.map(e => {
+        const shown = S.ioShown[e.key];
+        return `<tr>
+          <td class="name mono" style="font-size:11.5px">${esc(e.key)}</td>
+          <td class="mono" style="font-size:11px">
+            ${e.secret && !shown
+              ? `<span style="letter-spacing:2px;color:var(--text-3)">••••••••</span>
+                 <button class="btn sm ghost" style="height:18px;padding:0 5px;margin-left:4px" onclick="ioReveal('${esc(e.key)}')">显示</button>`
+              : esc(String(e.value).slice(0, 60))}
+          </td>
+          <td>${e.from === 'app' ? '<span class="chip blue">应用配置</span>' : '<span class="chip">工作负载</span>'}</td>
+          <td class="tiny">${e.from === 'app' ? esc(e.scope === 'all' ? '全部组件' : e.scope) : '仅本负载'}</td>
+          <td>${e.secret ? '<span class="badge purple">secretKeyRef</span>' : '<span class="badge muted">明文</span>'}</td>
+          <td class="right" onclick="event.stopPropagation()">
+            <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
+              ${e.from === 'app'
+                ? `<button class="btn sm" onclick="location.hash='/apps/${app.id}/config'">去配置页</button>`
+                : `<button class="btn sm" onclick="wlEnvEdit('${esc(e.key)}')">编辑</button>
+                   <button class="mini-act danger" title="删除变量" onclick="wlEnvDelete('${esc(e.key)}')">${icon('archive', '', 13)}</button>`}
+            </div>
+          </td>
+        </tr>`;
+      }).join('') : `<tr><td colspan="6"><div class="empty" style="padding:26px 16px">
+        <h3>还没有环境变量</h3><p>在应用「配置与密钥」里添加，或在本页新增工作负载自有变量。</p></div></td></tr>`}</tbody>
+    </table>
+    <div class="cfg-foot">工作负载自有变量与同名的应用配置「同名覆盖」，只影响本负载；密钥统一在应用级维护，避免轮换时逐负载改。</div>
+  </div>
+
+  <div class="card" style="box-shadow:none">
+    <div class="card-head">
+      <div class="t">存储卷</div>
+      <div class="r">
+        <span class="tiny muted">${vols.length} 个挂载${files.length ? ` · 含 ${files.length} 个配置文件` : ''}</span>
+        <button class="btn sm primary" onclick="wlVolNew()">${icon('plus', '', 12)}新增存储卷</button>
+      </div>
+    </div>
+    <table class="table">
+      <thead><tr><th style="width:24%">卷名</th><th style="width:14%">类型</th><th style="width:10%">容量</th><th style="width:14%">存储类</th><th style="width:12%">访问模式</th><th style="width:16%">挂载路径</th><th class="right">操作</th></tr></thead>
+      <tbody>${vols.length ? vols.map(v => `<tr>
+        <td class="name mono" style="font-size:11.5px">${esc(v.name)}
+          <div class="sub">${v.type === 'pvc' ? esc(pvcName(wl, v)) : v.type === 'emptyDir' ? '随 Pod 生命周期' : esc(v.source || '') + (v.items ? ` · ${v.items.length} 个键` : '')}</div>
+        </td>
+        <td><span class="chip ${v.type === 'pvc' ? 'blue' : v.type === 'emptyDir' ? '' : v.type === 'secret' ? 'purple' : 'teal'}">${v.type === 'pvc' ? '持久卷' : v.type === 'emptyDir' ? '临时卷' : v.type === 'secret' ? '密钥卷' : '配置卷'}</span></td>
+        <td class="mono" style="font-size:11px">${esc(v.size || '—')}</td>
+        <td class="mono" style="font-size:11px">${esc(v.sc || '—')}</td>
+        <td class="tiny">${esc(v.type === 'pvc' ? (v.mode || 'ReadWriteOnce') : v.type === 'emptyDir' ? '—' : '只读')}</td>
+        <td class="mono" style="font-size:11px">${esc(v.mount)}</td>
+        <td class="right">
+          ${v.type === 'configMap' || v.type === 'secret'
+            ? '<span class="tiny muted">随配置变化</span>'
+            : `<button class="mini-act danger" title="移除挂载" onclick="wlVolDelete('${esc(v.name)}')">${icon('archive', '', 13)}</button>`}
+        </td>
+      </tr>`).join('') : `<tr><td colspan="7"><div class="empty" style="padding:26px 16px">
+        <h3>还没有存储卷</h3><p>持久卷适合数据库与日志，临时卷适合缓存与临时文件。</p></div></td></tr>`}</tbody>
+    </table>
+    <div class="cfg-foot">持久卷会创建同名的 PVC；StatefulSet 使用 volumeClaimTemplates 按副本独立申请，删负载不会自动删除数据卷。</div>
+  </div>`;
+}
+function ioReveal(key) {
+  S.ioShown[key] = !S.ioShown[key];
+  route();
+}
+function wlEnvModal(key) {
+  const { app, comp, w } = ioWl();
+  if (!w) return;
+  const item = key ? (w.env || []).find(e => e.key === key) : null;
+  const appCfg = configOf(app, comp.name).filter(c => (c.mount || 'env') === 'env');
+  formModal({
+    title: item ? `编辑变量 · ${item.key}` : '新增环境变量',
+    desc: '工作负载自有变量只作用于本负载；与应用配置同名时以这里的值为准。',
+    okText: item ? '保存' : '新增',
+    body: `
+      ${fField('Key', fInput('key', item ? item.key : '', 'JAVA_TOOL_OPTIONS'), '大写字母、数字与下划线', true)}
+      ${fField('值', fInput('value', item ? item.value : '', ''), '纯文本；敏感信息请放到应用级密钥')}
+      ${appCfg.some(c => c.key === (item ? item.key : '')) ? '<div class="hint" style="color:var(--warning)">应用配置里已有同名 Key，保存后将覆盖应用级取值。</div>' : ''}`,
+    onSubmit: st => {
+      if (!/^[A-Z][A-Z0-9_]*$/.test(st.key)) return 'Key 只能是大写字母、数字与下划线，并以字母开头';
+      if (!st.value) return '请填写变量值';
+      w.env = w.env || [];
+      if (w.env.some(e => e.key === st.key && e.key !== key)) return `变量 ${st.key} 已存在`;
+      if (item) item.value = st.value;
+      else w.env.push({ key: st.key, value: st.value });
+      app.updated = nowStamp();
+      saveSnapshot();
+      route();
+      toast(item ? '变量已更新' : '变量已新增', 'ok');
+    }
+  });
+}
+function wlEnvNew() { wlEnvModal(''); }
+function wlEnvEdit(key) { wlEnvModal(key); }
+function wlEnvDelete(key) {
+  const { app, w } = ioWl();
+  if (!w) return;
+  openModal({
+    title: '删除环境变量',
+    desc: key,
+    danger: true,
+    okText: '确认删除',
+    body: `<p style="margin:0;font-size:12.5px;color:var(--text-2)">删除后，本负载下次发布时不再注入该变量；若应用配置里有同名项，会回落到应用级取值。</p>`,
+    onOk: () => {
+      w.env = (w.env || []).filter(e => e.key !== key);
+      app.updated = nowStamp();
+      saveSnapshot();
+      route();
+      toast('变量已删除', 'warn');
+    }
+  });
+}
+function wlVolModal() {
+  const { app, comp, w } = ioWl();
+  if (!w) return;
+  const used = (w.volumes || []).map(v => v.name);
+  formModal({
+    title: '新增存储卷',
+    desc: '持久卷用于数据与日志；临时卷随 Pod 重建清空，适合缓存。',
+    okText: '挂载',
+    wide: true,
+    body: `
+      <div class="form-row">
+        ${fField('卷名', fInput('name', '', 'data'), '小写字母、数字与连字符，PVC 名为「负载名-卷名」', true)}
+        ${fField('类型', fSelect('type', VOL_TYPES, 'pvc'))}
+      </div>
+      <div class="form-row">
+        ${fField('容量', fInput('size', '20Gi', '20Gi'), '持久卷必填，临时卷作为 sizeLimit')}
+        ${fField('挂载路径', fInput('mount', '/data', '/data'), '容器内绝对路径', true)}
+      </div>
+      <div class="form-row">
+        ${fField('存储类', fSelect('sc', SC_DEFS.map(s => [s.name, s.name]), 'standard-ssd'), '决定后端存储与绑定方式')}
+        ${fField('访问模式', fSelect('mode', ACCESS_MODES, 'ReadWriteOnce'))}
+      </div>`,
+    onSubmit: st => {
+      const name = String(st.name || '').trim();
+      if (!NAME_RE.test(name)) return '卷名只能是小写字母、数字与连字符';
+      if (used.includes(name)) return `卷名 ${name} 已存在`;
+      if (!String(st.mount || '').startsWith('/')) return '挂载路径需以 / 开头';
+      const pvc = st.type === 'pvc';
+      if (pvc && !String(st.size || '').trim()) return '持久卷需要填写容量';
+      if (pvc && !/^\d+(Gi|Mi|Ti)$/.test(String(st.size).trim())) return '容量格式如 20Gi / 512Mi / 1Ti';
+      w.volumes = w.volumes || [];
+      w.volumes.push({
+        name,
+        type: pvc ? 'pvc' : 'emptyDir',
+        size: String(st.size || '').trim(),
+        sc: pvc ? st.sc : '',
+        mode: pvc ? st.mode : '',
+        mount: st.mount
+      });
+      app.updated = nowStamp();
+      saveSnapshot();
+      route();
+      toast(`已挂载 ${name} 到 ${st.mount}`, 'ok');
+    }
+  });
+}
+function wlVolNew() { wlVolModal(); }
+function wlVolDelete(name) {
+  const { app, w } = ioWl();
+  if (!w) return;
+  const v = (w.volumes || []).find(x => x.name === name);
+  if (!v) return;
+  openModal({
+    title: '移除存储卷',
+    desc: `${name} · ${v.mount}`,
+    danger: true,
+    okText: '确认移除',
+    body: `<div class="danger-box">
+        从负载清单中移除挂载点后，Pod 重建即生效。
+        ${v.type === 'pvc' ? 'PVC 会保留（回收策略 Delete 时才随声明删除），数据不会自动清除，但负载将无法再访问。' : '临时卷内的数据会随 Pod 删除而丢失。'}
+      </div>`,
+    onOk: () => {
+      w.volumes = w.volumes.filter(x => x.name !== name);
+      app.updated = nowStamp();
+      saveSnapshot();
+      route();
+      toast(`已移除挂载 ${name}`, 'warn');
+    }
+  });
+}
+
+/* ---------- 全局：存储 ---------- */
+function pvcList() {
+  const out = [];
+  DB.apps.forEach(a => a.components.forEach(c => c.workloads.forEach(w => {
+    (w.volumes || []).filter(v => v.type === 'pvc').forEach(v => out.push({
+      name: pvcName(w, v), app: a.name, appId: a.id, comp: c.name, wl: w.name,
+      size: v.size || '—', sc: v.sc || 'standard-ssd', mode: v.mode || 'ReadWriteOnce',
+      mount: v.mount, status: w.status === '运行中' ? '已绑定' : '未绑定'
+    }));
+  })));
+  return out;
+}
+function storageUsedGi(size) {
+  const m = String(size || '').match(/^([\d.]+)\s*(Ti|Gi|Mi)$/);
+  if (!m) return 0;
+  const n = parseFloat(m[1]);
+  return m[2] === 'Ti' ? n * 1024 : m[2] === 'Mi' ? n / 1024 : n;
+}
+function viewStorage() {
+  setCrumb('存储');
+  const list = pvcList();
+  const totalGi = list.reduce((s, p) => s + storageUsedGi(p.size), 0);
+  const pending = list.filter(p => p.status === '未绑定').length;
+  const scRows = SC_DEFS.map(sc => {
+    const own = list.filter(p => p.sc === sc.name);
+    return { ...sc, count: own.length, gi: own.reduce((s, p) => s + storageUsedGi(p.size), 0), wls: new Set(own.map(p => p.wl)).size };
+  });
+  const q = String(S.storeQ || '').trim().toLowerCase();
+  const rows = list.filter(p => !q || [p.name, p.app, p.wl, p.sc].join(' ').toLowerCase().includes(q));
+  return `
+  <div class="page-head">
+    <div><div class="ttl">存储</div><div class="sub">持久卷由工作负载的存储卷声明派生，随发布一起下发；临时卷不计入容量。</div></div>
+    <div class="acts"><button class="btn" onclick="toast('存储类由集群管理员在基础设施侧维护')">存储类说明</button></div>
+  </div>
+  <div class="grid g4" style="margin-bottom:14px">
+    <div class="stat"><div class="lab">持久卷声明</div><div class="val">${list.length}</div><div class="foot">跨 ${new Set(list.map(p => p.app)).size} 个应用</div></div>
+    <div class="stat"><div class="lab">申请容量</div><div class="val">${fmtQty(totalGi)}<small>Gi</small></div><div class="foot">按声明值合计，非实际占用</div></div>
+    <div class="stat"><div class="lab">存储类</div><div class="val">${scRows.filter(s => s.count).length}<small>/ ${SC_DEFS.length}</small></div><div class="foot">默认 standard-ssd</div></div>
+    <div class="stat"><div class="lab">未绑定</div><div class="val" style="color:${pending ? 'var(--warning)' : 'inherit'}">${pending}</div><div class="foot">${pending ? '所属工作负载非运行中' : '全部已绑定'}</div></div>
+  </div>
+
+  <div class="grid g3" style="margin-bottom:14px">
+    ${scRows.map(s => `<div class="card"><div class="card-body">
+      <div class="spread"><div style="font-size:13px;font-weight:650" class="mono">${esc(s.name)}</div>
+        ${s.name === 'standard-ssd' ? '<span class="badge info">默认</span>' : ''}</div>
+      <div class="tiny muted" style="margin-top:3px">${esc(s.provider)} · ${esc(s.reclaim)} · ${esc(s.binding)}</div>
+      <div class="divider"></div>
+      <div class="spread" style="font-size:12px"><span class="muted">声明 / 容量</span><span><b>${s.count}</b> 个 · <span class="mono">${fmtQty(s.gi)}Gi</span></span></div>
+      <div class="tiny muted" style="margin-top:6px">${esc(s.desc)}</div>
+    </div></div>`).join('')}
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <div class="search" style="margin:0;width:240px">${icon('search', '', 14)}
+        <input id="store-q" placeholder="搜索 PVC / 应用 / 工作负载" value="${esc(S.storeQ || '')}" oninput="storeSet(this.value)" />
+      </div>
+      <div class="grow"><span class="tiny muted" style="align-self:center" id="store-count">${rows.length} / ${list.length} 个声明</span></div>
+    </div>
+    <table class="table">
+      <thead><tr><th style="width:24%">PVC</th><th style="width:20%">应用 / 工作负载</th><th style="width:9%">容量</th><th style="width:13%">存储类</th><th style="width:13%">访问模式</th><th style="width:12%">挂载路径</th><th>状态</th></tr></thead>
+      <tbody id="store-rows">${storeRows(rows)}</tbody>
+    </table>
+    <div class="cfg-foot">删除工作负载不会级联删除 PVC；需要回收数据时在集群侧手动处理，或在存储类上启用 Delete 回收策略。</div>
+  </div>`;
+}
+function storeRows(rows) {
+  if (!rows.length) {
+    return `<tr><td colspan="7"><div class="empty" style="padding:30px 16px">
+      <h3>没有匹配的持久卷</h3><p>在任意工作负载的「配置与存储」页签里新增持久卷。</p></div></td></tr>`;
+  }
+  return rows.map(p => `<tr class="clickable" onclick="openWlIO('${p.appId}','${esc(p.comp)}','${esc(p.wl)}')">
+    <td class="name mono" style="font-size:11.5px">${esc(p.name)}</td>
+    <td class="tiny">${esc(p.app)}<div class="sub">${esc(p.wl)}</div></td>
+    <td class="mono" style="font-size:11px">${esc(p.size)}</td>
+    <td class="mono" style="font-size:11px">${esc(p.sc)}</td>
+    <td class="tiny">${esc(p.mode)}</td>
+    <td class="mono" style="font-size:11px">${esc(p.mount)}</td>
+    <td>${badge(p.status)}</td>
+  </tr>`).join('');
+}
+function storeSet(v) {
+  S.storeQ = v;
+  const q = String(v || '').trim().toLowerCase();
+  const rows = pvcList().filter(p => !q || [p.name, p.app, p.wl, p.sc].join(' ').toLowerCase().includes(q));
+  const box = $('#store-rows');
+  if (box) box.innerHTML = storeRows(rows);
+  const cnt = $('#store-count');
+  if (cnt) cnt.textContent = `${rows.length} / ${pvcList().length} 个声明`;
+}
+function openWlIO(appId, comp, wl) {
+  S.wlPending = 'io';
+  goto(`#/workloads/${appId}/${comp}/${wl}`);
+}
+
 function ensureConfig(app) {
   if (!app) return [];
   if (!DB.config[app.id]) {
@@ -2868,12 +3292,13 @@ function ensureConfig(app) {
     ];
     if (comps.includes('order-service')) seed.push(
       { key: 'ORDER_TIMEOUT_MS', value: '800', scope: 'order-service', secret: false, note: '下单主流程超时（毫秒）' },
-      { key: 'FEATURE_SPLIT_ORDER', value: 'true', scope: 'order-service', secret: false, note: '门店自提订单拆分开关' }
+      { key: 'FEATURE_SPLIT_ORDER', value: 'true', scope: 'order-service', secret: false, note: '门店自提订单拆分开关' },
+      { key: 'application.yaml', value: 'server:\n  port: 8080\nmanagement:\n  endpoints:\n    web:\n      exposure:\n        include: health,info', scope: 'order-service', secret: false, mount: 'file', path: '/etc/app/conf', note: '外置配置文件，按文件挂载到容器' }
     );
     if (comps.includes('channel-adapter')) seed.push(
       { key: 'PAY_SIGN_KEY', value: 'sk_live_9f3c7a2b', scope: 'channel-adapter', secret: true, note: '渠道签名密钥' }
     );
-    DB.config[app.id] = seed.map((c, i) => Object.assign({ id: `cfg-${app.id}-${i}`, updated: app.updated || nowStamp() }, c));
+    DB.config[app.id] = seed.map((c, i) => Object.assign({ id: `cfg-${app.id}-${i}`, mount: 'env', updated: app.updated || nowStamp() }, c));
     saveSnapshot();
   }
   return DB.config[app.id];
@@ -2892,20 +3317,35 @@ function cfgFiltered(app) {
     return c.key.toLowerCase().includes(q) || String(c.value).toLowerCase().includes(q) || String(c.note || '').toLowerCase().includes(q);
   });
 }
+/* 多行值在表格里只显示首行，完整内容放在 title */
+function ioValPreview(v) {
+  const t = String(v == null ? '' : v);
+  const first = t.split('\n')[0];
+  const clipped = first.length > 46 ? first.slice(0, 46) : first;
+  return esc(clipped) + (t.includes('\n') || first.length > 46 ? '<span class="muted"> …</span>' : '');
+}
+function cfgUsers(app, scope) {
+  return app.components.filter(c => scope === 'all' || c.name === scope)
+    .reduce((s, c) => s + c.workloads.length, 0);
+}
 function cfgRows(app) {
   const list = cfgFiltered(app);
   if (!list.length) {
-    return `<tr><td colspan="5"><div class="empty" style="padding:30px 16px"><h3>没有匹配的配置项</h3><p>换个作用域或类型，或者新增一条。</p></div></td></tr>`;
+    return `<tr><td colspan="7"><div class="empty" style="padding:30px 16px"><h3>没有匹配的配置项</h3><p>换个作用域或类型，或者新增一条。</p></div></td></tr>`;
   }
   return list.map(c => `<tr>
     <td class="name mono" style="font-size:11.5px">${esc(c.key)}${c.note ? `<div class="sub" style="font-weight:400">${esc(c.note)}</div>` : ''}</td>
-    <td class="mono" style="font-size:11px">
+    <td class="mono" style="font-size:11px" title="${esc(String(c.value).slice(0, 120))}">
       ${c.secret && !S.cfgShown[c.id]
         ? `<span style="letter-spacing:2px;color:var(--text-3)">••••••••</span>
            <button class="btn sm ghost" style="height:18px;padding:0 5px;margin-left:4px" onclick="cfgReveal('${app.id}','${c.id}')">显示</button>`
-        : esc(c.value)}
+        : ioValPreview(c.value)}
     </td>
-    <td>${c.scope === 'all' ? '<span class="chip">全部组件</span>' : `<span class="chip blue">${esc(c.scope)}</span>`}</td>
+    <td>${c.scope === 'all' ? '<span class="chip">全部组件</span>' : `<span class="chip blue">${esc(c.scope)}</span>`}
+      <div class="sub">${cfgUsers(app, c.scope)} 个工作负载</div></td>
+    <td>${c.mount === 'file'
+      ? `<span class="badge info">文件挂载</span><div class="sub mono">${esc(c.path || '/etc/app/conf')}</div>`
+      : `<span class="badge outline">环境变量</span>`}</td>
     <td>${c.secret ? '<span class="badge purple">密钥</span>' : '<span class="badge muted">明文</span>'}</td>
     <td class="tiny muted">${esc(c.updated)}</td>
     <td class="right">
@@ -2938,13 +3378,20 @@ function appConfigView(app) {
       </div>
     </div>
     <table class="table">
-      <thead><tr><th>Key</th><th>值</th><th>生效范围</th><th>类型</th><th>更新</th><th class="right">操作</th></tr></thead>
+      <thead><tr><th>Key</th><th>值</th><th>生效范围</th><th>挂载方式</th><th>类型</th><th>更新</th><th class="right">操作</th></tr></thead>
       <tbody id="cfg-rows">${cfgRows(app)}</tbody>
     </table>
     <div class="cfg-foot">
-      配置项按作用域注入到工作负载的环境变量；密钥在下发时以 secretKeyRef 引用，不写进 Deployment 明文。
+      环境变量方式按作用域注入 env；文件方式按同一目录合并成 ConfigMap / Secret 卷挂载，密钥始终以 secretKeyRef 或 secret 卷引用，不写进 Deployment 明文。
     </div>
   </div>`;
+}
+function cfgMountChange() {
+  const mask = document.querySelector('.modal-mask:last-child');
+  if (!mask) return;
+  const sel = mask.querySelector('[data-k=mount]');
+  const box = mask.querySelector('#cfg-path');
+  if (sel && box) box.style.display = sel.value === 'file' ? '' : 'none';
 }
 function cfgSet(k, v) {
   S['cfg' + k[0].toUpperCase() + k.slice(1)] = v;
@@ -2979,24 +3426,33 @@ function cfgModal(appId, id) {
     desc: 'Key 在同一作用域内唯一；密钥类型的值不会明文下发到工作负载。',
     okText: item ? '保存' : '新增',
     body: `
-      ${fField('Key', fInput('key', item ? item.key : '', 'ORDER_TIMEOUT_MS'), '大写字母、数字与下划线', true)}
-      ${fField('值', fInput('value', item ? item.value : '', item && item.secret ? '密钥值' : ''))}
+      ${fField('Key', fInput('key', item ? item.key : '', 'ORDER_TIMEOUT_MS'), '环境变量：大写字母、数字与下划线；文件挂载：文件名如 application.yaml', true)}
+      ${fField('值', fArea('value', item ? item.value : '', item && item.secret ? '密钥值' : '配置值，支持多行'), '按原样写入；文件挂载时即文件内容')}
       <div class="form-row">
         ${fField('生效范围', fSelect('scope', scopes, item ? item.scope : 'all'))}
-        ${fField('说明', fInput('note', item ? item.note || '' : '', '可选'))}
+        ${fField('挂载方式', fSelect('mount', [['env', '环境变量'], ['file', '文件挂载']], item ? (item.mount || 'env') : 'env', ' onchange="cfgMountChange()"'))}
       </div>
-      ${fCheck('secret', '作为密钥下发', item ? !!item.secret : false, '以 secretKeyRef 引用，不写进 Deployment 明文')}`,
+      <div id="cfg-path" style="${item && item.mount === 'file' ? '' : 'display:none'}">
+        ${fField('挂载目录', fInput('path', item ? item.path || '/etc/app/conf' : '/etc/app/conf', '/etc/app/conf'), '同一目录下的配置项合并成一个卷挂载')}
+      </div>
+      ${fField('说明', fInput('note', item ? item.note || '' : '', '可选'))}
+      ${fCheck('secret', '作为密钥下发', item ? !!item.secret : false, '以 secretKeyRef 或 secret 卷引用，不写进 Deployment 明文')}`,
     onSubmit: st => {
-      if (!/^[A-Z][A-Z0-9_]*$/.test(st.key)) return 'Key 只能是大写字母、数字与下划线，并以字母开头';
-      if (!st.value) return '请填写配置值';
+      const isFile = st.mount === 'file';
+      if (isFile ? !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(st.key) : !/^[A-Z][A-Z0-9_]*$/.test(st.key)) {
+        return isFile ? '文件名只能包含字母、数字、点、下划线与连字符' : 'Key 只能是大写字母、数字与下划线，并以字母开头';
+      }
+      if (!String(st.value || '').trim()) return '请填写配置值';
+      if (isFile && !String(st.path || '').startsWith('/')) return '挂载目录需以 / 开头';
       if (list.some(c => c.key === st.key && c.scope === st.scope && c.id !== id)) return `作用域 ${st.scope === 'all' ? '全部组件' : st.scope} 下已存在 ${st.key}`;
+      const patch = {
+        key: st.key, value: st.value, scope: st.scope, secret: st.secret,
+        mount: st.mount, path: isFile ? st.path : '', note: st.note, updated: nowStamp()
+      };
       if (item) {
-        Object.assign(item, { key: st.key, value: st.value, scope: st.scope, secret: st.secret, note: st.note, updated: nowStamp() });
+        Object.assign(item, patch);
       } else {
-        list.unshift({
-          id: `cfg-${appId}-${Date.now().toString(36)}`,
-          key: st.key, value: st.value, scope: st.scope, secret: st.secret, note: st.note, updated: nowStamp()
-        });
+        list.unshift(Object.assign({ id: `cfg-${appId}-${Date.now().toString(36)}` }, patch));
       }
       app.updated = nowStamp();
       app.events.unshift({ t: clockNow(), k: '', tx: `配置 <b>${esc(st.key)}</b> ${item ? '已更新' : '已新增'}（作用域 ${esc(st.scope === 'all' ? '全部组件' : st.scope)}）` });
@@ -6238,7 +6694,9 @@ function viewDesign() {
           ['流量规则编排', 'Service Mesh → 流量规则，新建/编辑灰度、重试、熔断与镜像规则', '/mesh/traffic'],
           ['边缘节点纳管', '云边端协同 → 边缘节点，登记节点、看容量曲线与逐节点工作负载', '/edge/nodes'],
           ['应用分发', '云边端协同 → 应用分发，新建分发任务并逐节点查看进度', '/edge/distribute'],
-          ['集群接入', '运维中心 → 集群管理 → 接入集群，校验后接管调度', '/ops/clusters']
+          ['集群接入', '运维中心 → 集群管理 → 接入集群，校验后接管调度', '/ops/clusters'],
+          ['配置与存储', '工作负载 → 配置与存储，变量与持久卷可增删，YAML 同步生成', '/workloads/retail-platform/order-service/order-service-api'],
+          ['存储视图', '运维中心 → 存储，按存储类汇总 PVC 与申请容量', '/storage']
         ].map(([t, d, r]) => `
           <div style="display:flex;gap:9px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer" onclick="location.hash='${r}'">
             <span style="color:var(--primary);margin-top:1px">${icon('chev', '', 13)}</span>
@@ -6867,6 +7325,7 @@ function route() {
   else if (seg[0] === 'edge' && seg[1] === 'distribute') html = viewEdgeDistribute();
   else if (seg[0] === 'edge' && seg[1] === 'devices') html = viewEdgeDevices();
   else if (seg[0] === 'edge') html = viewEdgeNodes();
+  else if (seg[0] === 'storage') html = viewStorage();
   else if (seg[0] === 'ops' && seg[1] === 'clusters' && seg[2]) html = viewCluster(decodeURIComponent(seg[2]));
   else if (seg[0] === 'ops' && seg[1] === 'clusters') html = viewClusters();
   else if (seg[0] === 'ops' && seg[1] === 'alerts') html = viewAlerts();
@@ -6887,6 +7346,7 @@ function route() {
 
 /* ---------------- 启动 ---------------- */
 normalizeModel();
+normalizeIO();
 normalizeEdge();
 normalizeClusters();
 normalizeEdgeDist();
