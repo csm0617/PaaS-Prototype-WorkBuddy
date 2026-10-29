@@ -78,16 +78,29 @@ function normalizeModel() {
       if (!c.port) c.port = 8080;
       if (!c.healthPath) c.healthPath = '/healthz';
       if (!c.readyPath) c.readyPath = '/readyz';
+      if (!c.owner) c.owner = a.owner || DB.user.name;
+      if (!c.repo) c.repo = `ssh://git.corp.io/${a.id.split('-')[0]}/${c.name}`;
+      if (!c.branch) c.branch = 'main';
+      if (!c.protocol) c.protocol = protoOf(c.role);
+      if (!c.buildMode) c.buildMode = 'Dockerfile 构建';
+      if (!c.createdAt) c.createdAt = a.updated || nowStamp();
       c.workloads.forEach(w => {
         const m = String(w.ready || '').match(/(\d+)\s*\/\s*(\d+)/);
         if (typeof w.replicas !== 'number') w.replicas = m ? +m[2] : (w.kind === 'CronJob' ? 0 : 1);
         if (typeof w.readyN !== 'number') w.readyN = m ? Math.min(+m[1], w.replicas) : w.replicas;
         w.ready = w.kind === 'CronJob' ? '—' : `${w.readyN}/${w.replicas}`;
       });
+      if (!c.defaults) {
+        const w0 = c.workloads[0] || {};
+        c.defaults = {
+          replicas: typeof w0.replicas === 'number' ? w0.replicas : 2,
+          cpu: fitSpec(w0.cpu, CPU_OPTS, '1 / 2c'),
+          mem: fitSpec(w0.mem, MEM_OPTS, '2 / 4Gi')
+        };
+      }
     });
   });
 }
-normalizeModel();
 function wReady(w) { return w.kind === 'CronJob' ? '—' : `${w.readyN}/${w.replicas}`; }
 function setReplicas(w, n) {
   w.replicas = n;
@@ -937,6 +950,7 @@ function appTabBody(app) {
             <div class="d mono" style="margin-top:2px">${esc(comp.image)}:${esc(comp.version)} · ${runtimeText(comp)}</div>
             <div class="dep-chips">
               <span class="chip svc" title="集群内服务名与端口">${esc(comp.serviceName || comp.name)}:${comp.port}</span>
+              <span class="chip proto" title="对外协议">${esc(comp.protocol || 'HTTP')}</span>
               ${(() => {
                 const d = compDeps(app.id, comp.name);
                 return d.up.map(x => `<span class="chip" title="上游调用方 · ${esc(x.l || '')}">← ${esc(x.n)}</span>`).join('')
@@ -946,7 +960,7 @@ function appTabBody(app) {
           </div>
           <div class="r">
             <button class="btn sm ghost" onclick="newWorkload('${app.id}','${comp.name}')">${icon('plus', '', 12)}工作负载</button>
-            <button class="btn sm" onclick="toast('组件配置（原型）')">配置</button>
+            <button class="btn sm" onclick="componentConfig('${app.id}','${comp.name}')">配置</button>
             <button class="btn sm primary" onclick="releaseApp('${app.id}','${comp.name}')">${icon('send', '', 12)}发布</button>
             <button class="mini-act danger" title="删除组件" onclick="deleteComponent('${app.id}','${comp.name}')">${icon('archive', '', 13)}</button>
           </div>
@@ -3295,7 +3309,7 @@ function newPipeline() {
         trigger: s.trigger, branch: s.branch || 'main',
         status: '已就绪', last: '尚未运行', success: 100, runs: 0,
         env: s.env, strategy: s.strategy,
-        repo: s.repo, dockerfile: s.dockerfile, buildEnv: s.buildEnv,
+        repo: s.repo || comp.repo || 'ssh://git.corp.io/retail/', dockerfile: s.dockerfile, buildEnv: s.buildEnv,
         approvers: `${app.owner || DB.user.name}（应用负责人）`,
         stages, logs: [], history: []
       };
@@ -4336,6 +4350,31 @@ function viewDesign() {
 const COMP_ROLES = ['核心服务', '入口网关', '边缘采集', '异步任务', '渠道适配', '流接入', '协议解析', '推理引擎', '规则计算', '对账任务'];
 const BUILD_MODES = ['Dockerfile 构建', 'Buildpack 自动识别', '引用已有镜像'];
 const RUNTIME_PENDING = '待首次构建确定';
+const CPU_OPTS = ['0.2 / 1c', '0.5 / 2c', '1 / 2c', '2 / 4c', '4 / 8c'];
+const MEM_OPTS = ['512Mi / 1Gi', '1Gi / 2Gi', '2 / 4Gi', '4 / 8Gi', '8 / 16Gi'];
+const PROTOCOLS = ['HTTP', 'gRPC', 'MQTT', 'MQ'];
+/* 把 "1.8 / 8c" 这类实际值对齐到规格下拉里的规范选项（优先同上限、再比当前值） */
+function fitSpec(v, opts, fallback) {
+  if (!v) return fallback;
+  if (opts.includes(v)) return v;
+  const target = parseRes(v, opts === MEM_OPTS ? 'mem' : 'cpu');
+  let best = fallback, bestDiff = Infinity;
+  opts.forEach(o => {
+    const cand = parseRes(o, opts === MEM_OPTS ? 'mem' : 'cpu');
+    const diff = Math.abs(cand.cap - target.cap) * 100 + Math.abs(cand.cur - target.cur);
+    if (diff < bestDiff) { bestDiff = diff; best = o; }
+  });
+  return best;
+}
+
+/* 组件对外协议：按角色给出合理默认，可在组件配置里改 */
+function protoOf(role) {
+  const r = String(role || '');
+  if (r.includes('边缘') || r.includes('协议解析')) return 'MQTT';
+  if (r.includes('异步') || r.includes('对账')) return 'MQ';
+  if (r.includes('推理')) return 'gRPC';
+  return 'HTTP';
+}
 /* 运行时是构建产物属性，创建时不让人手填；首次构建成功后从构建环境回填 */
 function runtimeText(comp) {
   if (!comp || !comp.runtime || comp.runtime === RUNTIME_PENDING) {
@@ -4494,15 +4533,10 @@ function newApp() {
       const comps = [];
       let firstComp = null;
       if (s.createComp) {
-        const comp = {
-          name: s.compName,
-          role: s.compRole,
-          runtime: RUNTIME_PENDING,
-          buildMode: s.compBuild,
-          image: s.compImage || `hub.corp.io/demo/${s.compName}`,
-          version: s.compVersion || 'v1.0.0',
-          workloads: []
-        };
+        const comp = makeComponent({
+          name: s.compName, role: s.compRole, buildMode: s.compBuild,
+          image: s.compImage, version: s.compVersion, owner: s.owner
+        }, { id, owner: s.owner });
         if (s.createWl) comp.workloads.push(buildWorkload(s, comp));
         comps.push(comp);
         firstComp = comp.name;
@@ -4536,6 +4570,103 @@ function newApp() {
 }
 
 /* ---------- 新建组件 ---------- */
+/* 组件工厂：创建路径统一补齐身份/构建/契约/默认规格 */
+function makeComponent(src, app) {
+  const role = src.role || '核心服务';
+  const appId = app ? app.id : 'demo';
+  return {
+    name: src.name,
+    role,
+    runtime: RUNTIME_PENDING,
+    buildMode: src.buildMode || 'Dockerfile 构建',
+    image: src.image || `hub.corp.io/demo/${src.name}`,
+    version: src.version || 'v1.0.0',
+    serviceName: src.name,
+    port: 8080,
+    healthPath: '/healthz',
+    readyPath: '/readyz',
+    protocol: protoOf(role),
+    owner: src.owner || (app ? app.owner : DB.user.name),
+    repo: src.repo || `ssh://git.corp.io/${String(appId).split('-')[0]}/${src.name}`,
+    branch: 'main',
+    createdAt: nowStamp(),
+    defaults: { replicas: 2, cpu: '1 / 2c', mem: '2 / 4Gi' },
+    workloads: []
+  };
+}
+
+function componentConfig(appId, compName) {
+  const app = DB.apps.find(a => a.id === appId);
+  const comp = app && app.components.find(c => c.name === compName);
+  if (!comp) return;
+  formModal({
+    title: `组件配置 · ${comp.name}`,
+    desc: '身份、代码与构建、服务契约、默认规格。新建工作负载时按默认规格预填。',
+    okText: '保存配置',
+    wide: true,
+    body: `
+      <div class="form-sec">身份</div>
+      <div class="form-row">
+        ${fField('角色', fSelect('role', COMP_ROLES, comp.role), '影响默认协议与组件列表的筛选')}
+        ${fField('负责人', fInput('owner', comp.owner || app.owner))}
+      </div>
+      <div class="form-sec">代码与构建</div>
+      <div class="form-row">
+        ${fField('代码仓库', fInput('repo', comp.repo), '新建流水线时默认带出')}
+        ${fField('分支', fInput('branch', comp.branch || 'main'))}
+      </div>
+      <div class="form-row">
+        ${fField('构建方式', fSelect('buildMode', BUILD_MODES, comp.buildMode || 'Dockerfile 构建'))}
+        ${fField('镜像版本', fInput('version', comp.version))}
+      </div>
+      <div class="form-sec">服务契约</div>
+      <div class="form-row">
+        ${fField('协议', fSelect('protocol', PROTOCOLS, comp.protocol || 'HTTP'))}
+        ${fField('端口', fInput('port', comp.port, '8080', 'number'))}
+      </div>
+      <div class="form-row">
+        ${fField('存活探针', fInput('healthPath', comp.healthPath, '/healthz'), '容器内 HTTP 路径')}
+        ${fField('就绪探针', fInput('readyPath', comp.readyPath, '/readyz'))}
+      </div>
+      <div class="form-sec">默认规格</div>
+      <div class="form-row cols3">
+        ${fField('副本数', fInput('replicas', String(comp.defaults.replicas), '2', 'number'))}
+        ${fField('CPU', fSelect('cpu', CPU_OPTS, comp.defaults.cpu))}
+        ${fField('内存', fSelect('mem', MEM_OPTS, comp.defaults.mem))}
+      </div>`,
+    onSubmit: st => {
+      if (!st.version) return '请填写镜像版本';
+      const port = clampInt(st.port, 1, 65535, comp.port || 8080);
+      if (!/^[1-9]\d{1,4}$/.test(String(st.port))) return '端口需为 1-65535 之间的整数';
+      for (const [k, label] of [['healthPath', '存活探针'], ['readyPath', '就绪探针']]) {
+        if (!String(st[k] || '').startsWith('/')) return `${label}路径需以 / 开头`;
+      }
+      if (!st.repo) return '请填写代码仓库地址';
+      const changed = [];
+      const apply = (k, v, label) => { if (comp[k] !== v) { comp[k] = v; changed.push(label); } };
+      apply('role', st.role, '角色');
+      apply('owner', st.owner, '负责人');
+      apply('repo', st.repo, '代码仓库');
+      apply('branch', st.branch || 'main', '分支');
+      apply('buildMode', st.buildMode, '构建方式');
+      apply('version', st.version, '版本');
+      apply('protocol', st.protocol, '协议');
+      apply('port', port, '端口');
+      apply('healthPath', st.healthPath, '存活探针');
+      apply('readyPath', st.readyPath, '就绪探针');
+      const reps = clampInt(st.replicas, 0, 50, comp.defaults.replicas);
+      const nextDefaults = { replicas: reps, cpu: st.cpu, mem: st.mem };
+      if (JSON.stringify(nextDefaults) !== JSON.stringify(comp.defaults)) { comp.defaults = nextDefaults; changed.push('默认规格'); }
+      if (!changed.length) return '配置没有变化';
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: '', tx: `组件 <b>${esc(comp.name)}</b> 配置更新：${esc(changed.join('、'))}` });
+      saveSnapshot();
+      route();
+      toast(`已更新 ${esc(comp.name)}：${changed.join('、')}`, 'ok');
+    }
+  });
+}
+
 function newComponent(appId) {
   const app = DB.apps.find(a => a.id === appId);
   if (!app) return;
@@ -4559,15 +4690,10 @@ function newComponent(appId) {
       if (!st.name) return '请填写组件名称';
       if (!NAME_RE.test(st.name)) return '组件名称只能包含小写字母、数字与短横线，并以字母或数字开头';
       if (app.components.some(c => c.name === st.name)) return `应用内已存在组件「${st.name}」`;
-      const comp = {
-        name: st.name,
-        role: st.role,
-        runtime: RUNTIME_PENDING,
-        buildMode: st.buildMode,
-        image: st.image || `hub.corp.io/demo/${st.name}`,
-        version: st.version || 'v1.0.0',
-        workloads: []
-      };
+      const comp = makeComponent({
+        name: st.name, role: st.role, buildMode: st.buildMode,
+        image: st.image, version: st.version
+      }, app);
       if (st.withWl) {
         comp.workloads.push(buildWorkload({
           wlName: `${st.name}-api`, wlKind: 'Deployment', wlReplicas: '2',
@@ -4602,15 +4728,15 @@ function newWorkload(appId, compName) {
       ${fField('工作负载名称', fInput('name', '', `例如：${comp.name}-api`), '小写字母、数字与短横线', true)}
       <div class="form-row">
         ${fField('类型', fSelect('kind', WL_KINDS, 'Deployment'))}
-        ${fField('副本数', fInput('replicas', '2', '2', 'number'), 'CronJob 无需副本')}
+        ${fField('副本数', fInput('replicas', String(comp.defaults.replicas), '2', 'number'), '默认取组件规格')}
       </div>
       <div class="form-row">
         ${fField('调度位置', fSelect('where', wlSpots(), '云端'))}
         ${fField('镜像版本', fInput('image', comp.version))}
       </div>
       <div class="form-row">
-        ${fField('CPU 规格', fSelect('cpu', ['0.2 / 1c', '0.5 / 2c', '1 / 2c', '2 / 4c', '4 / 8c'], '1 / 2c'))}
-        ${fField('内存规格', fSelect('mem', ['512Mi / 1Gi', '1Gi / 2Gi', '2 / 4Gi', '4 / 8Gi', '8 / 16Gi'], '2 / 4Gi'))}
+        ${fField('CPU 规格', fSelect('cpu', CPU_OPTS, comp.defaults.cpu))}
+        ${fField('内存规格', fSelect('mem', MEM_OPTS, comp.defaults.mem))}
       </div>
       ${S.modules.mesh ? '<div class="tiny muted">云端工作负载将自动注入 Sidecar（Service Mesh 已启用）。</div>' : ''}`,
     onSubmit: st => {
@@ -4827,6 +4953,7 @@ function route() {
 }
 
 /* ---------------- 启动 ---------------- */
+normalizeModel();
 window.addEventListener('hashchange', route);
 renderTopbar();
 renderSidebar();

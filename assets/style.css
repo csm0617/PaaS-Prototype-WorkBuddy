@@ -581,7 +581,7 @@ button { font-family: inherit; }
 
 /* ---------------- 表单弹窗 ---------------- */
 .modal.wide { width: 660px; }
-.modal.wide .mb { max-height: min(58vh, 470px); overflow-y: auto; }
+.modal.wide .mb { max-height: min(66vh, 560px); overflow-y: auto; }
 .modal .mf .btn.primary { min-width: 84px; justify-content: center; }
 
 .wiz-head { padding: 16px 20px 0; }
@@ -906,3 +906,12 @@ button { font-family: inherit; }
 .dep-chips { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
 .dep-chips .chip { font-size: 10px; padding: 1px 6px; background: #f4f6fb; color: var(--text-2); }
 .dep-chips .chip.svc { background: var(--primary-soft); color: var(--primary); font-family: var(--mono); font-weight: 600; }
+
+/* 组件配置弹窗的分组标题 */
+.form-sec {
+  font-size: 11px; font-weight: 600; color: var(--text-3); letter-spacing: .4px;
+  margin: 16px 0 9px; padding-top: 12px; border-top: 1px dashed var(--border);
+}
+.form-sec:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+.dep-chips .chip.proto { background: #f1f4fa; color: var(--text-2); font-family: var(--mono); }
+.form-row.cols3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
