@@ -29,6 +29,9 @@ const S = {
   wlPending: null,
   pipeStage: -1,
   pipeRunKey: '',
+  compQ: '',
+  compApp: 'all',
+  compFilter: 'all',
   yamlDiff: false,
   logs: { key: '', lines: [], level: 'all', q: '', container: '', paused: false, pending: 0, follow: true },
   term: [],
@@ -155,6 +158,7 @@ const NAV = [
   {
     label: '应用管理', items: [
       { label: '应用列表', icon: 'box', route: '/apps' },
+      { label: '组件', icon: 'topo2', route: '/components' },
       { label: '工作负载', icon: 'layers', route: '/workloads' },
       { label: '访问入口', icon: 'globe', route: '/access' }
     ]
@@ -715,7 +719,8 @@ function viewApps() {
                 : `<div class="tiny muted" style="margin-top:7px">未配置访问入口</div>`;
           })()}
           <div style="display:flex;gap:18px;margin-top:12px">
-            <div><div class="tiny muted">组件</div><div style="font-size:16px;font-weight:660">${a.components.length}</div></div>
+            <div class="link" title="查看该应用的组件" onclick="event.stopPropagation();openComponentsOf('${a.id}')">
+              <div class="tiny muted">组件</div><div style="font-size:16px;font-weight:660;color:inherit">${a.components.length}</div></div>
             <div><div class="tiny muted">工作负载</div><div style="font-size:16px;font-weight:660">${wlCount}</div></div>
             <div><div class="tiny muted">健康度</div><div style="font-size:16px;font-weight:660;color:${a.health > 97 ? 'var(--success)' : a.health > 90 ? 'var(--warning)' : a.health > 0 ? 'var(--danger)' : 'var(--text-3)'}">${a.health > 0 ? a.health + '<span style="font-size:10px">%</span>' : '—'}</div></div>
           </div>
@@ -1385,6 +1390,141 @@ function copyText(t) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(t).then(done).catch(fallback);
   } else fallback();
+}
+
+/* ==========================================================
+   全局组件视图：应用 → 组件 → 工作负载 的中间层
+   ========================================================== */
+function compRows() {
+  const rows = [];
+  DB.apps.forEach(a => a.components.forEach(c => {
+    let ready = 0, want = 0;
+    c.workloads.forEach(w => {
+      const m = String(w.ready).match(/(\d+)\s*\/\s*(\d+)/);
+      if (m) { ready += +m[1]; want += +m[2]; }
+    });
+    const bad = c.workloads.filter(w => w.status !== '运行中' && w.status !== '已完成').length;
+    rows.push({
+      name: c.name, role: c.role, runtime: c.runtime, image: c.image, version: c.version,
+      app: a.name, appId: a.id, appLevel: a.level,
+      wl: c.workloads.length, bad, ready, want
+    });
+  }));
+  return rows;
+}
+function compFiltered() {
+  const q = (S.compQ || '').trim().toLowerCase();
+  return compRows().filter(c => {
+    if (S.compApp !== 'all' && c.appId !== S.compApp) return false;
+    if (S.compFilter === 'bad' && !c.bad) return false;
+    if (S.compFilter === 'empty' && c.wl) return false;
+    if (!q) return true;
+    return c.name.includes(q) || c.app.toLowerCase().includes(q) || c.role.toLowerCase().includes(q) || c.runtime.toLowerCase().includes(q);
+  });
+}
+function viewComponents() {
+  setCrumb('组件');
+  const all = compRows();
+  const list = compFiltered();
+  const badCount = all.filter(c => c.bad).length;
+  const emptyCount = all.filter(c => !c.wl).length;
+  return `
+  <div class="page-head">
+    <div>
+      <div class="ttl">组件</div>
+      <div class="sub">组件是构建与发布的边界：向上归属应用，向下展开为工作负载。此视图跨应用汇总全部组件。</div>
+    </div>
+    <div class="acts">
+      <button class="btn" onclick="location.hash='/apps'">${icon('box', '', 14)}按应用浏览</button>
+      <button class="btn primary" onclick="newComponentGlobal()">${icon('plus', '', 14)}新建组件</button>
+    </div>
+  </div>
+
+  <div class="grid g4" style="margin-bottom:14px">
+    <div class="stat"><div class="lab">组件</div><div class="val">${all.length}</div>
+      <div class="foot">分布在 <b>${new Set(all.map(c => c.appId)).size}</b> 个应用</div></div>
+    <div class="stat"><div class="lab">工作负载</div><div class="val">${all.reduce((s, c) => s + c.wl, 0)}</div>
+      <div class="foot">平均 <b>${all.length ? (all.reduce((s, c) => s + c.wl, 0) / all.length).toFixed(1) : '0.0'}</b> 个 / 组件</div></div>
+    <div class="stat"><div class="lab">实例</div><div class="val">${all.reduce((s, c) => s + c.ready, 0)}<small> / ${all.reduce((s, c) => s + c.want, 0)}</small></div>
+      <div class="foot">就绪 / 期望副本</div></div>
+    <div class="stat"><div class="lab">需关注</div><div class="val" style="${badCount || emptyCount ? 'color:var(--warning)' : ''}">${badCount + emptyCount}</div>
+      <div class="foot">${badCount} 个有异常负载 · ${emptyCount} 个暂无工作负载</div></div>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <div class="search" style="margin:0;width:240px">${icon('search', '', 14)}
+        <input id="comp-q" placeholder="组件名 / 应用 / 运行时" value="${esc(S.compQ)}" oninput="compQuery(this.value)" />
+      </div>
+      <select class="input" style="width:170px;height:30px;padding:0 8px;font-size:12px" onchange="compApp(this.value)">
+        <option value="all"${S.compApp === 'all' ? ' selected' : ''}>全部应用</option>
+        ${DB.apps.map(a => `<option value="${a.id}"${S.compApp === a.id ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}
+      </select>
+      ${[['all', '全部'], ['bad', '有异常'], ['empty', '无工作负载']].map(([k, n]) =>
+        `<button class="filter-pill ${S.compFilter === k ? 'on' : ''}" onclick="compFilter('${k}')">${n}</button>`).join('')}
+      <div class="grow"><span class="tiny muted" style="align-self:center" id="comp-count">${list.length} 个组件</span></div>
+    </div>
+    <table class="table">
+      <thead><tr><th>组件</th><th>所属应用</th><th>角色</th><th>运行时</th><th>版本</th><th class="right">工作负载</th><th class="right">实例</th><th>状态</th></tr></thead>
+      <tbody id="comp-rows">${compTableRows(list)}</tbody>
+    </table>
+  </div>`;
+}
+function compTableRows(list) {
+  if (!list.length) {
+    return `<tr><td colspan="8"><div class="empty" style="padding:34px 16px">
+      <h3>没有匹配的组件</h3><p>换个应用或筛选条件，或者清空搜索关键词。</p></div></td></tr>`;
+  }
+  return list.map(c => `<tr class="clickable" onclick="openComponent('${c.appId}','${esc(c.name)}')">
+    <td class="name">${esc(c.name)}<div class="sub mono">${esc(c.image)}</div></td>
+    <td><span style="color:var(--text)">${esc(c.app)}</span> ${badge(c.appLevel)}</td>
+    <td><span class="chip">${esc(c.role)}</span></td>
+    <td class="tiny" style="color:var(--text-2)">${esc(c.runtime)}</td>
+    <td class="mono" style="font-size:11px">${esc(c.version)}</td>
+    <td class="right num">${c.wl}</td>
+    <td class="right num">${c.want ? `${c.ready}/${c.want}` : '—'}</td>
+    <td>${c.bad ? `<span class="badge warn">${c.bad} 个异常</span>` : c.wl ? '<span class="badge ok"><i></i>健康</span>' : '<span class="badge muted">无负载</span>'}</td>
+  </tr>`).join('');
+}
+function paintComps() {
+  const list = compFiltered();
+  const rows = $('#comp-rows');
+  if (rows) rows.innerHTML = compTableRows(list);
+  const cnt = $('#comp-count');
+  if (cnt) cnt.textContent = `${list.length} 个组件`;
+}
+function compQuery(v) { S.compQ = v; paintComps(); }
+function compApp(v) { S.compApp = v; paintComps(); }
+function compFilter(v) {
+  S.compFilter = v;
+  document.querySelectorAll('.filter-pill').forEach(el => el.classList.remove('on'));
+  const btn = [...document.querySelectorAll('.filter-pill')].find(b => b.textContent.trim() === ({ all: '全部', bad: '有异常', empty: '无工作负载' })[v]);
+  if (btn) btn.classList.add('on');
+  paintComps();
+}
+function openComponent(appId, name) {
+  S.appComp = name;
+  S.appWl = null;
+  goAppTab(appId, 'components');
+}
+function openComponentsOf(appId) {
+  S.compApp = appId;
+  S.compFilter = 'all';
+  S.compQ = '';
+  goto('#/components');
+}
+function newComponentGlobal() {
+  if (!DB.apps.length) return toast('请先创建应用，组件必须归属于应用', 'warn');
+  formModal({
+    title: '新建组件',
+    desc: '组件必须归属于某个应用；创建后可在应用详情里继续添加工作负载。',
+    okText: '下一步',
+    body: fField('所属应用', fSelect('appId', DB.apps.map(a => [a.id, a.name]), DB.apps[0].id), '组件是构建与发布的边界'),
+    onSubmit: st => {
+      if (!DB.apps.some(a => a.id === st.appId)) return '请选择所属应用';
+      newComponent(st.appId);
+    }
+  });
 }
 
 /* ==========================================================
@@ -4091,6 +4231,7 @@ function viewDesign() {
           ['扩缩容与删除', '应用详情右上「扩缩容」与「···」，真实改写演示数据', '/apps/retail-platform'],
           ['模块开关', '平台管理 → 模块管理，关闭 Service Mesh 后观察应用详情页签变化', '/admin/modules'],
           ['三层资源树', '应用详情 → 组件与工作负载，左侧树可逐层下钻', '/apps/retail-platform'],
+          ['全局组件视图', '应用管理 → 组件，跨应用汇总组件、实例水位与异常', '/components'],
           ['组件拓扑', '应用详情 → 组件拓扑，按依赖分层，点节点可下钻', '/apps/retail-platform'],
           ['访问入口', '应用详情 → 访问入口，查看域名与网关路径两种形态', '/apps/retail-platform'],
           ['全局入口视图', '应用管理 → 访问入口，跨应用汇总所有对外地址', '/access'],
@@ -4576,6 +4717,7 @@ function route() {
   else if (seg[0] === 'apps') html = viewApps();
   else if (seg[0] === 'workloads' && seg[1]) html = viewWorkloadDetail(
     decodeURIComponent(seg[1]), decodeURIComponent(seg[2] || ''), decodeURIComponent(seg[3] || ''));
+  else if (seg[0] === 'components') html = viewComponents();
   else if (seg[0] === 'workloads') html = viewWorkloads();
   else if (seg[0] === 'access') html = viewAccessList();
   else if (seg[0] === 'cicd' && seg[1]) html = viewPipeline(seg[1], seg[2]);
