@@ -906,7 +906,7 @@ function appTabBody(app) {
         <div class="card-head">
           <div>
             <div class="t">${esc(comp.name)} <span class="chip" style="margin-left:4px">${esc(comp.role)}</span></div>
-            <div class="d mono" style="margin-top:2px">${esc(comp.image)}:${esc(comp.version)} · ${esc(comp.runtime)}</div>
+            <div class="d mono" style="margin-top:2px">${esc(comp.image)}:${esc(comp.version)} · ${runtimeText(comp)}</div>
           </div>
           <div class="r">
             <button class="btn sm ghost" onclick="newWorkload('${app.id}','${comp.name}')">${icon('plus', '', 12)}工作负载</button>
@@ -1405,7 +1405,9 @@ function compRows() {
     });
     const bad = c.workloads.filter(w => w.status !== '运行中' && w.status !== '已完成').length;
     rows.push({
-      name: c.name, role: c.role, runtime: c.runtime, image: c.image, version: c.version,
+      name: c.name, role: c.role, image: c.image, version: c.version,
+      runtime: c.runtime, buildMode: c.buildMode,
+      pending: !c.runtime || c.runtime === RUNTIME_PENDING,
       app: a.name, appId: a.id, appLevel: a.level,
       wl: c.workloads.length, bad, ready, want
     });
@@ -1479,7 +1481,9 @@ function compTableRows(list) {
     <td class="name">${esc(c.name)}<div class="sub mono">${esc(c.image)}</div></td>
     <td><span style="color:var(--text)">${esc(c.app)}</span> ${badge(c.appLevel)}</td>
     <td><span class="chip">${esc(c.role)}</span></td>
-    <td class="tiny" style="color:var(--text-2)">${esc(c.runtime)}</td>
+    <td class="tiny" style="color:var(--text-2)">${c.pending
+      ? `<span class="muted" title="运行时由首次构建自动识别，创建时无需填写">待首次构建</span>`
+      : esc(c.runtime)}${c.buildMode && c.pending ? `<div class="sub">${esc(c.buildMode)}</div>` : ''}</td>
     <td class="mono" style="font-size:11px">${esc(c.version)}</td>
     <td class="right num">${c.wl}</td>
     <td class="right num">${c.want ? `${c.ready}/${c.want}` : '—'}</td>
@@ -3080,6 +3084,7 @@ function promoteCanary(id) {
   const i = p.stages.findIndex(s => s.n === '灰度发布');
   if (i >= 0) p.stages[i] = { n: '灰度发布', s: 'done', d: '4m12s' };
   p.status = '成功';
+  applyRuntimeFromBuild(p);
   p.logs.push([clockNow(), 't', 'canary 50%  deployed  errorRate=0.00%']);
   p.logs.push([clockNow(), 'ok', 'stage canary ✓ 4m12s  权重推进至 100%']);
   const app = DB.apps.find(a => a.id === p.appId);
@@ -3118,16 +3123,28 @@ function simulateRun(p, i) {
   setTimeout(() => {
     if (p.status !== '运行中') return;
     const s = p.stages[i];
-    if (!s) { p.status = '成功'; p.history[0].status = '成功'; p.history[0].dur = '5m48s'; saveSnapshot(); if (location.hash.startsWith(`#/cicd/${p.id}`)) route(); return; }
+    if (!s) { p.status = '成功'; p.history[0].status = '成功'; p.history[0].dur = '5m48s'; applyRuntimeFromBuild(p); saveSnapshot(); if (location.hash.startsWith(`#/cicd/${p.id}`)) route(); return; }
     s.s = 'done'; s.d = durStr(mulberry32(Date.now() & 0xffff));
     p.logs.push([clockNow(), 'ok', `stage ${s.n} ✓ ${s.d}`]);
+    // 制品产出即可回填运行时（模拟构建环境自动识别）
+    if (s.n === '编译构建') applyRuntimeFromBuild(p);
     const next = p.stages[i + 1];
-    if (next) { next.s = 'run'; next.d = '0s'; }
+    if (next) {
+      if (next.n === '人工审批') {
+        // 停在审批门禁，等人工放行，避免模拟推进把审批一起跳过
+        next.s = 'wait'; next.d = '—';
+        p.status = '运行中';
+        saveSnapshot();
+        if (location.hash.startsWith(`#/cicd/${p.id}`)) route();
+        return;
+      }
+      next.s = 'run'; next.d = '0s';
+    }
     saveSnapshot();
     if (location.hash.startsWith(`#/cicd/${p.id}`)) route();
     if (i + 1 < p.stages.length) simulateRun(p, i + 1);
     else setTimeout(() => {
-      p.status = '成功'; p.history[0].status = '成功'; p.history[0].dur = '5m48s'; saveSnapshot();
+      p.status = '成功'; p.history[0].status = '成功'; p.history[0].dur = '5m48s'; applyRuntimeFromBuild(p); saveSnapshot();
       if (location.hash.startsWith(`#/cicd/${p.id}`)) route();
     }, 900);
   }, i === 0 ? 900 : 1500);
@@ -4270,7 +4287,20 @@ function viewDesign() {
    ========================================================== */
 
 const COMP_ROLES = ['核心服务', '入口网关', '边缘采集', '异步任务', '渠道适配', '流接入', '协议解析', '推理引擎', '规则计算', '对账任务'];
-const RUNTIMES = ['Java 17 · Spring Boot 3.2', 'Go 1.22', 'Node.js 20', 'Python 3.12', 'Rust 1.77', 'Envoy 1.29', 'Nginx 1.25'];
+const BUILD_MODES = ['Dockerfile 构建', 'Buildpack 自动识别', '引用已有镜像'];
+const RUNTIME_PENDING = '待首次构建确定';
+/* 运行时是构建产物属性，创建时不让人手填；首次构建成功后从构建环境回填 */
+function runtimeText(comp) {
+  if (!comp || !comp.runtime || comp.runtime === RUNTIME_PENDING) {
+    return `<span class="muted" title="运行时由首次构建自动识别">待首次构建</span>`;
+  }
+  return esc(comp.runtime);
+}
+function applyRuntimeFromBuild(p) {
+  const app = DB.apps.find(a => a.id === p.appId);
+  const comp = app && app.components.find(c => c.name === p.comp);
+  if (comp && (!comp.runtime || comp.runtime === RUNTIME_PENDING)) comp.runtime = p.buildEnv || '容器镜像';
+}
 const WL_KINDS = [['Deployment', 'Deployment · 无状态服务'], ['StatefulSet', 'StatefulSet · 有状态'], ['CronJob', 'CronJob · 定时任务'], ['EdgeApp', 'EdgeApp · 边缘应用']];
 const wlSpots = () => S.modules.edge
   ? [['云端', '云端集群'], ['边缘', '边缘节点'], ['端侧', '端设备']]
@@ -4323,7 +4353,7 @@ function newApp() {
       desc: '',
       createComp: true,
       compName: '', compRole: '核心服务', compImage: '',
-      compRuntime: 'Java 17 · Spring Boot 3.2', compVersion: 'v1.0.0',
+      compBuild: 'Dockerfile 构建', compVersion: 'v1.0.0',
       createWl: true,
       wlName: '', wlKind: 'Deployment', wlReplicas: '2', wlWhere: '云端',
       wlCpu: '1 / 2c', wlMem: '2 / 4Gi', wlImage: ''
@@ -4357,7 +4387,7 @@ function newApp() {
             ${fField('组件名称', fInput('compName', s.compName, '例如：member-service'), '小写字母、数字与短横线', true)}
             <div class="form-row">
               ${fField('角色', fSelect('compRole', COMP_ROLES, s.compRole))}
-              ${fField('运行时', fSelect('compRuntime', RUNTIMES, s.compRuntime))}
+              ${fField('构建方式', fSelect('compBuild', BUILD_MODES, s.compBuild), '运行时由首次构建自动识别')}
             </div>
             <div class="form-row">
               ${fField('镜像仓库', fInput('compImage', s.compImage, '默认 hub.corp.io/demo/<组件名>'))}
@@ -4401,7 +4431,7 @@ function newApp() {
             <dt>业务域</dt><dd>${esc(s.domain)} · 负责人 ${esc(s.owner || DB.user.name)}</dd>
             <dt>环境</dt><dd>${esc(s.env)}</dd>
             <dt>说明</dt><dd style="color:var(--text-2)">${esc(s.desc || '未填写')}</dd>
-            <dt>组件</dt><dd>${s.createComp ? `<span class="mono">${esc(s.compName)}</span> · ${esc(s.compRole)} · ${esc(s.compVersion)}` : '<span class="muted">暂不创建</span>'}</dd>
+            <dt>组件</dt><dd>${s.createComp ? `<span class="mono">${esc(s.compName)}</span> · ${esc(s.compRole)} · ${esc(s.compBuild)} · ${esc(s.compVersion)}` : '<span class="muted">暂不创建</span>'}</dd>
             <dt>工作负载</dt><dd>${wl ? `<span class="mono">${esc(s.wlName)}</span> · ${esc(s.wlKind)} · ${s.wlKind === 'CronJob' ? '定时触发' : `${clampInt(s.wlReplicas, 0, 50, 2)} 副本`} · ${esc(s.wlWhere)}` : '<span class="muted">暂不创建</span>'}</dd>
           </div>
           <div class="warn-box" style="margin-top:14px">
@@ -4418,7 +4448,8 @@ function newApp() {
         const comp = {
           name: s.compName,
           role: s.compRole,
-          runtime: s.compRuntime,
+          runtime: RUNTIME_PENDING,
+          buildMode: s.compBuild,
           image: s.compImage || `hub.corp.io/demo/${s.compName}`,
           version: s.compVersion || 'v1.0.0',
           workloads: []
@@ -4467,12 +4498,13 @@ function newComponent(appId) {
       ${fField('组件名称', fInput('name', '', '例如：member-service'), '小写字母、数字与短横线', true)}
       <div class="form-row">
         ${fField('角色', fSelect('role', COMP_ROLES, '核心服务'))}
-        ${fField('运行时', fSelect('runtime', RUNTIMES, 'Java 17 · Spring Boot 3.2'))}
+        ${fField('构建方式', fSelect('buildMode', BUILD_MODES, 'Dockerfile 构建'), '运行时由构建自动识别，创建时无需手填')}
       </div>
       <div class="form-row">
-        ${fField('镜像仓库', fInput('image', '', '默认 hub.corp.io/demo/<组件名>'))}
+        ${fField('镜像仓库', fInput('image', '', '默认 hub.corp.io/demo/<组件名>'), '推送目标；引用已有镜像时填完整地址')}
         ${fField('初始版本', fInput('version', 'v1.0.0'))}
       </div>
+
       ${fCheck('withWl', '同时创建默认工作负载', true, `Deployment · 2 副本 · ${clusterOf('云端')}`)}`,
     onSubmit: st => {
       if (!st.name) return '请填写组件名称';
@@ -4481,7 +4513,8 @@ function newComponent(appId) {
       const comp = {
         name: st.name,
         role: st.role,
-        runtime: st.runtime,
+        runtime: RUNTIME_PENDING,
+        buildMode: st.buildMode,
         image: st.image || `hub.corp.io/demo/${st.name}`,
         version: st.version || 'v1.0.0',
         workloads: []
