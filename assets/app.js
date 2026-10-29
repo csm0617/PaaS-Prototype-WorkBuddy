@@ -37,6 +37,8 @@ const S = {
   cfgScope: 'all-app',
   cfgType: 'all',
   cfgShown: {},
+  ruleQ: '',
+  ruleType: 'all',
   yamlDiff: false,
   logs: { key: '', lines: [], level: 'all', q: '', container: '', paused: false, pending: 0, follow: true },
   term: [],
@@ -57,6 +59,14 @@ function loadSnapshot() {
       if (Array.isArray(d.pipelines)) DB.pipelines = d.pipelines;
       if (Array.isArray(d.releases)) DB.releases = d.releases;
       if (d.config && typeof d.config === 'object') DB.config = d.config;
+      if (Array.isArray(d.meshRules)) DB.mesh.rules = d.meshRules;
+      if (Array.isArray(d.edgeNodes)) DB.edge.nodes = d.edgeNodes;
+      if (Array.isArray(d.edgeDist)) DB.edge.dist = d.edgeDist;
+      if (Array.isArray(d.clusters)) DB.clusters = d.clusters;
+      if (Array.isArray(d.envs)) DB.envs = d.envs;
+      if (Array.isArray(d.roles)) DB.roles = d.roles;
+      if (Array.isArray(d.edgeDevices)) DB.edge.devices = d.edgeDevices;
+      if (d.moduleCfg && typeof d.moduleCfg === 'object') DB.moduleCfg = d.moduleCfg;
     }
   } catch (e) { /* 快照损坏时退回 data.js 初始数据 */ }
 }
@@ -64,7 +74,10 @@ function saveSnapshot() {
   try {
     localStorage.setItem(LS_DB, JSON.stringify({
       v: 1, apps: DB.apps, access: DB.access,
-      pipelines: DB.pipelines, releases: DB.releases, config: DB.config
+      pipelines: DB.pipelines, releases: DB.releases, config: DB.config,
+      meshRules: DB.mesh.rules, edgeNodes: DB.edge.nodes, edgeDist: DB.edge.dist,
+      clusters: DB.clusters, envs: DB.envs, roles: DB.roles,
+      edgeDevices: DB.edge.devices, moduleCfg: DB.moduleCfg
     }));
   } catch (e) { /* 存储不可用时降级为纯内存态 */ }
 }
@@ -158,7 +171,8 @@ const STK = {
   '待调度': 'muted', '待执行': 'muted', '已停用': 'muted', '已忽略': 'muted', '跳过': 'muted', '未启用': 'muted',
   '未处理': 'bad', '失败': 'bad', '离线': 'bad', '已停止': 'bad', '严重': 'bad',
   '警告': 'warn', '提示': 'muted', 'P0': 'bad', 'P1': 'warn', 'P2': 'muted',
-  '正常': 'ok', '慢调用': 'warn', '错误': 'bad', '超时': 'bad'
+  '正常': 'ok', '慢调用': 'warn', '错误': 'bad', '超时': 'bad',
+  '待激活': 'warn', '接入中': 'info', '已封锁': 'muted'
 };
 function badge(t, k) { return `<span class="badge ${k || STK[t] || 'muted'}">${t === '运行中' || t === '健康' || t === '在线' ? '<i></i>' : ''}${esc(t)}</span>`; }
 function pbadge(t) {
@@ -193,7 +207,9 @@ const ICONS = {
   trace: '<circle cx="3.4" cy="3.4" r="1.5"/><path d="M6.1 3.4h7.5"/><circle cx="3.4" cy="8" r="1.5"/><path d="M6.1 8h5.2"/><circle cx="3.4" cy="12.6" r="1.5"/><path d="M6.1 12.6h8.1"/>',
   refresh: '<path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8"/><path d="M13.6 2.4v3.4h-3.4"/>',
   plus: '<path d="M8 3.4v9.2M3.4 8h9.2"/>',
-  chev: '<path d="M6 4l4 4-4 4"/>'
+  chev: '<path d="M6 4l4 4-4 4"/>',
+  edit: '<path d="M11.1 2.6l2.3 2.3-8 8-2.9.6.6-2.9z"/><path d="M9.7 4l2.3 2.3"/>',
+  power: '<path d="M8 2.2v5.4"/><path d="M12.3 4.7a5.6 5.6 0 1 1-8.6 0"/>'
 };
 function icon(n, cls = 'ico', size = 15) {
   return `<svg class="${cls}" width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
@@ -541,8 +557,8 @@ function fField(label, control, hint = '', req = false) {
 function fInput(k, value = '', ph = '', type = 'text') {
   return `<input class="input" data-k="${k}" type="${type}" value="${esc(value)}" placeholder="${esc(ph)}" />`;
 }
-function fSelect(k, opts, value) {
-  return `<select class="input" data-k="${k}">${opts.map(o => {
+function fSelect(k, opts, value, attrs = '') {
+  return `<select class="input" data-k="${k}"${attrs}>${opts.map(o => {
     const v = Array.isArray(o) ? o[0] : o, n = Array.isArray(o) ? o[1] : o;
     return `<option value="${esc(v)}"${String(v) === String(value) ? ' selected' : ''}>${esc(n)}</option>`;
   }).join('')}</select>`;
@@ -2879,7 +2895,7 @@ function cfgFiltered(app) {
 function cfgRows(app) {
   const list = cfgFiltered(app);
   if (!list.length) {
-    return `<tr><td colspan="6"><div class="empty" style="padding:30px 16px"><h3>没有匹配的配置项</h3><p>换个作用域或类型，或者新增一条。</p></div></td></tr>`;
+    return `<tr><td colspan="5"><div class="empty" style="padding:30px 16px"><h3>没有匹配的配置项</h3><p>换个作用域或类型，或者新增一条。</p></div></td></tr>`;
   }
   return list.map(c => `<tr>
     <td class="name mono" style="font-size:11.5px">${esc(c.key)}${c.note ? `<div class="sub" style="font-weight:400">${esc(c.note)}</div>` : ''}</td>
@@ -3900,54 +3916,384 @@ function viewMesh() {
   </div>`;
 }
 
+/* ==========================================================
+   Service Mesh · 流量规则（虚拟服务 / 目标规则）
+   ========================================================== */
+const RULE_TYPES = ['虚拟服务', '目标规则'];
+const RULE_ACTS = {
+  '虚拟服务': [['split', '按版本权重路由'], ['mirror', '流量镜像']],
+  '目标规则': [['retry', '超时与重试'], ['circuit', '熔断'], ['outlier', '异常点驱逐']]
+};
+const MATCH_KINDS = [['all', '所有请求'], ['header', '请求头匹配'], ['path', '路径前缀'], ['percent', '按比例采样']];
+const JUDGE_KINDS = [['5xx', '连续 5xx'], ['5xx+timeout', '5xx 或超时'], ['conn', '连接失败']];
+
+function ruleMatchText(r) {
+  const m = r.match || {};
+  if (m.kind === 'header') return `header[${m.key}]=${m.value}`;
+  if (m.kind === 'path') return `路径前缀 ${m.value}`;
+  if (m.kind === 'percent') return `${m.value}% 采样`;
+  return '所有请求';
+}
+function ruleActionText(r) {
+  const a = r.act || {};
+  if (a.kind === 'split') return `权重 → ${(a.splits || []).map(x => `${x.ver} ${x.weight}%`).join(' · ')}`;
+  if (a.kind === 'mirror') return `镜像 → ${a.target}（${a.pct}% 采样）`;
+  if (a.kind === 'retry') return `重试 ${a.times} 次 · 超时 ${a.timeout}ms`;
+  if (a.kind === 'circuit') return `连续 ${a.fails} 次${a.judge === 'conn' ? '连接失败' : a.judge === '5xx+timeout' ? '5xx/超时' : ' 5xx'} → 隔离 ${a.isolate}s`;
+  if (a.kind === 'outlier') return `异常点驱逐 上限 ${a.pct}% · 基线 ${a.base}s`;
+  return '—';
+}
+function ruleFiltered() {
+  const q = String(S.ruleQ || '').trim().toLowerCase();
+  return DB.mesh.rules.filter(r => {
+    if (S.ruleType !== 'all' && r.type !== S.ruleType) return false;
+    if (!q) return true;
+    return [r.name, r.host, r.type, ruleMatchText(r), ruleActionText(r)].join(' ').toLowerCase().includes(q);
+  });
+}
+function ruleRows() {
+  const list = ruleFiltered();
+  if (!list.length) {
+    return `<tr><td colspan="6"><div class="empty" style="padding:30px 16px">
+      <h3>没有匹配的规则</h3><p>换个关键字或类型，或者新建一条。</p></div></td></tr>`;
+  }
+  return list.map(r => `<tr class="clickable" onclick="ruleModal('${r.id}')">
+    <td class="name" style="white-space:normal">
+      <div style="display:flex;align-items:center;gap:6px;min-width:0">
+        <span class="chip ${r.type === '虚拟服务' ? 'blue' : 'purple'}" style="flex:none">${esc(r.type)}</span>
+        <span class="mono" style="font-size:11.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name)} · ${esc(r.ns)}">${esc(r.name)}</span>
+      </div>
+      <div class="sub">${esc(r.host)} · 命中 ${esc(r.hits || '—')}</div>
+    </td>
+    <td class="mono" style="font-size:11px;white-space:nowrap">${esc(ruleMatchText(r))}</td>
+    <td class="tiny">${esc(ruleActionText(r))}</td>
+    <td>${badge(r.status)}</td>
+    <td class="right" onclick="event.stopPropagation()">
+      <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end">
+        <button class="mini-act" title="${r.status === '生效中' ? '停用规则' : '启用规则'}" onclick="ruleToggle('${r.id}')">${icon('power', '', 13)}</button>
+        <button class="mini-act danger" title="删除规则" onclick="ruleDelete('${r.id}')">${icon('archive', '', 13)}</button>
+      </div>
+    </td>
+  </tr>`).join('');
+}
+function ruleSet(k, v) {
+  if (k === 'q') S.ruleQ = v; else S.ruleType = v;
+  const box = $('#rule-rows');
+  if (box) box.innerHTML = ruleRows();
+  const cnt = $('#rule-count');
+  if (cnt) {
+    const on = DB.mesh.rules.filter(r => r.status === '生效中').length;
+    cnt.textContent = `${ruleFiltered().length} / ${DB.mesh.rules.length} 条 · ${on} 条生效中`;
+  }
+  if (k === 'type') {
+    document.querySelectorAll('.toolbar .filter-pill').forEach(b => b.classList.remove('on'));
+    const btn = [...document.querySelectorAll('.toolbar .filter-pill')].find(b => b.textContent.trim() === ({ all: '全部', '虚拟服务': '虚拟服务', '目标规则': '目标规则' })[v]);
+    if (btn) btn.classList.add('on');
+  }
+}
+
+/* 灰度权重卡：读当前生效的权重路由规则，不写死 */
+function canaryCard() {
+  const hitsNum = r => {
+    const m = String(r.hits || '').match(/([\d.]+)\s*([km])?/i);
+    if (!m) return 0;
+    return parseFloat(m[1]) * (m[2] && m[2].toLowerCase() === 'k' ? 1000 : m[2] && m[2].toLowerCase() === 'm' ? 1e6 : 1);
+  };
+  const splitRules = DB.mesh.rules
+    .filter(r => r.act && r.act.kind === 'split')
+    .sort((a, b) => (a.status === '生效中' ? 0 : 1) - (b.status === '生效中' ? 0 : 1) || hitsNum(b) - hitsNum(a));
+  const rule = splitRules[0];
+  if (!rule) {
+    return `<div class="card">
+      <div class="card-head"><div class="t">灰度权重</div></div>
+      <div class="empty" style="padding:30px 16px">
+        <h3>还没有权重路由</h3>
+        <p>新建一条虚拟服务规则，即可按版本权重分流。</p>
+        <button class="btn sm primary" onclick="ruleModal(null)">新建规则</button>
+      </div>
+    </div>`;
+  }
+  const splits = rule.act.splits || [];
+  const on = DB.mesh.rules.filter(r => r.status === '生效中').length;
+  return `<div style="display:flex;flex-direction:column;gap:14px">
+    <div class="card">
+      <div class="card-head"><div class="t">灰度权重</div><div class="r tiny muted">${esc(rule.name)}</div></div>
+      <div class="card-body">
+        <div style="font-size:11.5px;color:var(--text-3);margin-bottom:12px">${esc(rule.host)} 按版本分流${rule.status === '生效中' ? '' : '（规则已停用，权重不生效）'}</div>
+        ${splits.map(s => `<div style="margin-bottom:13px">
+          <div class="spread" style="font-size:12px;margin-bottom:5px"><span>${esc(s.ver)}${s.cur ? '（当前）' : '（灰度）'}</span><span class="mono">${s.weight}%</span></div>
+          <div class="progress"><div style="width:${s.weight}%;background:${s.cur ? 'var(--primary)' : 'var(--warning)'}"></div></div>
+        </div>`).join('')}
+        <div class="divider"></div>
+        <dl class="kv" style="grid-template-columns:80px 1fr">
+          <dt>匹配条件</dt><dd class="mono" style="font-size:11px">${esc(ruleMatchText(rule))}</dd>
+          <dt>命中流量</dt><dd class="mono" style="font-size:11px">${esc(rule.hits || '—')}</dd>
+          <dt>最近变更</dt><dd style="font-size:11.5px">${esc(rule.updated)} · ${esc(rule.by || '—')}</dd>
+        </dl>
+        <button class="btn primary" style="width:100%;justify-content:center;margin-top:14px" onclick="ruleModal('${rule.id}')">调整权重</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><div class="t">规则生效情况</div><div class="r"><span class="badge ok">${on} 生效中</span></div></div>
+      <div class="card-body">
+        <dl class="kv" style="grid-template-columns:80px 1fr">
+          <dt>虚拟服务</dt><dd>${DB.mesh.rules.filter(r => r.type === '虚拟服务').length} 条</dd>
+          <dt>目标规则</dt><dd>${DB.mesh.rules.filter(r => r.type === '目标规则').length} 条</dd>
+          <dt>已停用</dt><dd>${DB.mesh.rules.filter(r => r.status === '已停用').length} 条</dd>
+          <dt>覆盖服务</dt><dd>${new Set(DB.mesh.rules.map(r => r.host)).size} 个</dd>
+        </dl>
+        <div class="tiny muted" style="margin-top:10px;line-height:1.6">虚拟服务决定「请求怎么走」，目标规则决定「失败怎么办」。同名规则以创建时间较晚者生效。</div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function viewMeshTraffic() {
   setCrumb('流量规则');
   if (!S.modules.mesh) return moduleOffPage('mesh', 'Service Mesh', '流量规则依赖 Service Mesh 提供的数据面能力。');
+  const on = DB.mesh.rules.filter(r => r.status === '生效中').length;
   return `
   <div class="page-head">
     <div><div class="ttl">流量规则</div><div class="sub">虚拟服务与目标规则统一编排，支持灰度、超时重试、熔断与流量镜像。</div></div>
-    <div class="acts"><button class="btn primary" onclick="toast('新建流量规则（原型）')">${icon('plus', '', 14)}新建规则</button></div>
+    <div class="acts"><button class="btn primary" onclick="ruleModal(null)">${icon('plus', '', 14)}新建规则</button></div>
   </div>
   ${meshBanner()}
   ${meshTabs('/mesh/traffic')}
 
   <div class="grid g21">
     <div class="card">
-      <div class="card-head"><div class="t">规则列表</div><div class="r"><span class="badge ok">4 生效中</span></div></div>
+      <div class="toolbar">
+        <div class="search" style="margin:0;width:210px">${icon('search', '', 14)}
+          <input id="rule-q" placeholder="搜索规则 / 服务 / 动作" value="${esc(S.ruleQ)}" oninput="ruleSet('q', this.value)" />
+        </div>
+        ${[['all', '全部'], ['虚拟服务', '虚拟服务'], ['目标规则', '目标规则']].map(([k, n]) =>
+          `<button class="filter-pill ${S.ruleType === k ? 'on' : ''}" onclick="ruleSet('type','${k}')">${n}</button>`).join('')}
+        <div class="grow"><span class="tiny muted" style="align-self:center" id="rule-count">${ruleFiltered().length} / ${DB.mesh.rules.length} 条 · ${on} 条生效中</span></div>
+      </div>
       <table class="table">
-        <thead><tr><th>规则名</th><th>类型</th><th>目标服务</th><th>匹配条件</th><th>动作</th><th>状态</th></tr></thead>
-        <tbody>${DB.mesh.rules.map(r => `
-          <tr class="clickable" onclick="toast('编辑规则 ${r.name}（原型）')">
-            <td class="name mono" style="font-size:11.5px">${esc(r.name)}</td>
-            <td><span class="chip ${r.type === '虚拟服务' ? 'blue' : 'purple'}">${esc(r.type)}</span></td>
-            <td>${esc(r.host)}</td>
-            <td class="mono" style="font-size:11px">${esc(r.match)}</td>
-            <td class="tiny">${esc(r.action)}</td>
-            <td>${badge(r.status)}</td>
-          </tr>`).join('')}</tbody>
+        <thead><tr><th style="width:34%">规则名</th><th style="width:17%">匹配条件</th><th style="width:33%">动作</th><th>状态</th><th class="right">操作</th></tr></thead>
+        <tbody id="rule-rows">${ruleRows()}</tbody>
       </table>
     </div>
-
-    <div class="card">
-      <div class="card-head"><div class="t">灰度权重</div><div class="r tiny muted">order-service-canary</div></div>
-      <div class="card-body">
-        <div style="font-size:11.5px;color:var(--text-3);margin-bottom:12px">按权重在版本间分流</div>
-        ${[['v2.4.1（当前）', 90, 'var(--primary)'], ['v2.5.0（灰度）', 10, 'var(--warning)']].map(([n, w, c]) => `
-          <div style="margin-bottom:13px">
-            <div class="spread" style="font-size:12px;margin-bottom:5px"><span>${n}</span><span class="mono">${w}%</span></div>
-            <div class="progress"><div style="width:${w}%;background:${c}"></div></div>
-          </div>`).join('')}
-        <div class="divider"></div>
-        <dl class="kv" style="grid-template-columns:88px 1fr">
-          <dt>超时</dt><dd class="mono">800ms</dd>
-          <dt>重试</dt><dd>3 次 / 退避 25ms</dd>
-          <dt>熔断</dt><dd>连续 5 次 5xx 隔离 30s</dd>
-          <dt>镜像</dt><dd>10% 采样至 shadow</dd>
-        </dl>
-        <button class="btn primary" style="width:100%;justify-content:center;margin-top:14px" onclick="toast('权重已更新')">应用权重</button>
-      </div>
-    </div>
+    ${canaryCard()}
   </div>`;
+}
+
+/* ---------- 规则表单：类型 / 动作切换时局部重绘 ---------- */
+function ruleDyn(d) {
+  const type = d.type || '虚拟服务';
+  const acts = RULE_ACTS[type] || [];
+  const act = acts.some(([k]) => k === d.act) ? d.act : acts[0][0];
+  const mKind = d.mKind || 'all';
+  const val = (k, dv) => (d[k] === undefined || d[k] === '' ? String(dv) : String(d[k]));
+
+  let matchExtra = '';
+  if (mKind === 'header') {
+    matchExtra = `<div class="form-row">
+      ${fField('请求头', fInput('mKey', d.mKey || 'x-version', 'x-version'), '区分大小写')}
+      ${fField('期望值', fInput('mValue', d.mValue || 'v2', 'v2'))}
+    </div>`;
+  } else if (mKind === 'path') {
+    matchExtra = fField('路径前缀', fInput('mValue', d.mValue || '/api/', '/api/order'), '以 / 开头，前缀匹配');
+  } else if (mKind === 'percent') {
+    matchExtra = fField('采样比例', fInput('mValue', d.mValue || '10', '10', 'number'), '1 - 100，按请求百分比');
+  }
+
+  let actBody = '';
+  if (act === 'split') {
+    actBody = `<div class="form-row">
+        ${fField('主版本', fInput('s1ver', d.s1ver || '', 'v2.4.1'), '承接剩余权重的稳定版本')}
+        ${fField('主版本权重', fInput('s1w', val('s1w', 90), '90', 'number'))}
+      </div>
+      <div class="form-row">
+        ${fField('灰度版本', fInput('s2ver', d.s2ver || '', 'v2.5.0'))}
+        ${fField('灰度权重', fInput('s2w', val('s2w', 10), '10', 'number'))}
+      </div>
+      <div class="hint">两侧权重合计需为 100，未命中的请求走主版本。</div>`;
+  } else if (act === 'mirror') {
+    actBody = `<div class="form-row">
+        ${fField('镜像目标', fInput('mTarget', d.mTarget || '', 'inventory-shadow'), '通常是同名服务的 shadow 版本')}
+        ${fField('采样比例', fInput('mPct', val('mPct', 10), '10', 'number'), '按百分比复制请求，响应被丢弃')}
+      </div>`;
+  } else if (act === 'retry') {
+    actBody = `<div class="form-row">
+        ${fField('重试次数', fInput('rTimes', val('rTimes', 3), '3', 'number'))}
+        ${fField('单次超时 (ms)', fInput('rTimeout', val('rTimeout', 800), '800', 'number'))}
+      </div>
+      <div class="form-row">
+        ${fField('退避间隔 (ms)', fInput('rBackoff', val('rBackoff', 25), '25', 'number'))}
+        ${fField('重试条件', fSelect('rOn', [['5xx', '仅 5xx'], ['5xx+timeout', '5xx 或超时'], ['conn', '仅连接失败']], d.rOn || '5xx'))}
+      </div>`;
+  } else if (act === 'circuit') {
+    actBody = `<div class="form-row">
+        ${fField('连续失败次数', fInput('cFails', val('cFails', 5), '5', 'number'))}
+        ${fField('隔离时长 (s)', fInput('cIsolate', val('cIsolate', 30), '30', 'number'))}
+      </div>
+      <div class="form-row">
+        ${fField('失败判定', fSelect('cJudge', JUDGE_KINDS, d.cJudge || '5xx'))}
+        ${fField('半开探测数', fInput('cHalf', val('cHalf', 3), '3', 'number'), '隔离结束后放行的探测请求')}
+      </div>`;
+  } else if (act === 'outlier') {
+    actBody = `<div class="form-row">
+        ${fField('最大驱逐比例 (%)', fInput('oPct', val('oPct', 50), '50', 'number'), '避免一次性摘除全部实例')}
+        ${fField('驱逐时长 (s)', fInput('oBase', val('oBase', 30), '30', 'number'))}
+      </div>
+      <div class="form-row">
+        ${fField('检查间隔 (s)', fInput('oInterval', val('oInterval', 10), '10', 'number'))}
+        ${fField('连续错误次数', fInput('oFails', val('oFails', 5), '5', 'number'))}
+      </div>`;
+  }
+
+  return `<div class="form-sec">匹配条件</div>
+    <div class="form-row">${fField('匹配方式', fSelect('mKind', MATCH_KINDS, mKind, ' onchange="ruleRerender()"'))}</div>
+    ${matchExtra}
+    <div class="form-sec">动作</div>
+    <div class="form-row">${fField('动作类型', fSelect('act', acts, act, ' onchange="ruleRerender()"'))}</div>
+    ${actBody}`;
+}
+function ruleHostChange() {
+  const mask = document.querySelector('.modal-mask:last-child');
+  if (!mask) return;
+  const d = readForm(mask);
+  const svc = DB.mesh.services.find(x => x.name === d.host) || {};
+  const s1 = mask.querySelector('[data-k=s1ver]');
+  if (s1 && svc.ver) s1.value = svc.ver;
+}
+function ruleRerender() {
+  const mask = document.querySelector('.modal-mask:last-child');
+  const box = mask && mask.querySelector('#rule-dyn');
+  if (!box) return;
+  box.innerHTML = ruleDyn(readForm(mask));
+}
+function ruleModal(id) {
+  const list = DB.mesh.rules;
+  const item = id ? list.find(r => r.id === id) : null;
+  const svcOpts = DB.mesh.services.filter(s => s.status !== '跳过').map(s => [s.name, `${s.name} · ${s.ns}`]);
+  if (!svcOpts.length) return toast('还没有可用的 Mesh 服务', 'warn');
+  const svc = (name) => DB.mesh.services.find(s => s.name === name) || {};
+  const sp = (item && item.act.splits) || [{}, {}];
+  const d = item ? {
+    name: item.name, type: item.type, host: item.host,
+    mKind: item.match.kind, mKey: item.match.key, mValue: item.match.value,
+    act: item.act.kind,
+    s1ver: sp[0] && sp[0].ver, s1w: sp[0] && sp[0].weight,
+    s2ver: sp[1] && sp[1].ver, s2w: sp[1] && sp[1].weight,
+    mTarget: item.act.target, mPct: item.act.pct,
+    rTimes: item.act.times, rTimeout: item.act.timeout, rBackoff: item.act.backoff, rOn: item.act.on,
+    cFails: item.act.fails, cIsolate: item.act.isolate, cJudge: item.act.judge, cHalf: item.act.half,
+    oPct: item.act.pct, oBase: item.act.base, oInterval: item.act.interval, oFails: item.act.fails
+  } : { name: '', type: '虚拟服务', host: svcOpts[0][0], mKind: 'all', act: 'split', s1w: 90, s2w: 10, s1ver: (svc(svcOpts[0][0]).ver || '') };
+
+  formModal({
+    title: item ? `编辑规则 · ${item.name}` : '新建流量规则',
+    desc: '虚拟服务决定请求怎么走，目标规则决定失败怎么办。保存后立即下发到数据面。',
+    okText: item ? '保存并下发' : '创建并下发',
+    wide: true,
+    body: `
+      <div class="form-row">
+        ${fField('规则名', fInput('name', d.name, 'order-service-canary'), '小写字母、数字与连字符', true)}
+        ${fField('类型', fSelect('type', RULE_TYPES, d.type, ' onchange="ruleRerender()"'))}
+      </div>
+      ${fField('目标服务', fSelect('host', svcOpts, d.host, ' onchange="ruleHostChange()"'), '规则作用于该服务的入站流量', true)}
+      <div id="rule-dyn">${ruleDyn(d)}</div>
+      ${item ? fCheck('enable', '启用该规则', item.status === '生效中', '关闭后规则保留但不参与路由') : ''}`,
+    onSubmit: st => {
+      const name = String(st.name || '').trim();
+      if (!NAME_RE.test(name)) return '规则名只能是小写字母、数字与连字符，且以字母或数字开头';
+      if (list.some(r => r.name === name && r.id !== id)) return `规则名 ${name} 已存在`;
+      const target = DB.mesh.services.find(s => s.name === st.host);
+      if (!target) return '请选择目标服务';
+
+      const match = { kind: st.mKind || 'all' };
+      if (match.kind === 'header') {
+        if (!st.mKey) return '请填写请求头名称';
+        if (!st.mValue) return '请填写期望值';
+        match.key = st.mKey; match.value = st.mValue;
+      } else if (match.kind === 'path') {
+        if (!String(st.mValue || '').startsWith('/')) return '路径前缀需以 / 开头';
+        match.value = st.mValue;
+      } else if (match.kind === 'percent') {
+        match.value = String(clampInt(st.mValue, 1, 100, 10));
+      }
+
+      let act;
+      if (st.act === 'split') {
+        const w1 = clampInt(st.s1w, 0, 100, 90), w2 = clampInt(st.s2w, 0, 100, 10);
+        if (!st.s1ver || !st.s2ver) return '请填写主版本与灰度版本号';
+        if (st.s1ver === st.s2ver) return '主版本与灰度版本不能相同';
+        if (w1 + w2 !== 100) return `权重合计需为 100，当前 ${w1 + w2}`;
+        act = { kind: 'split', splits: [{ ver: st.s1ver, weight: w1, cur: true }, { ver: st.s2ver, weight: w2 }] };
+      } else if (st.act === 'mirror') {
+        if (!st.mTarget) return '请填写镜像目标服务';
+        if (st.mTarget === st.host) return '镜像目标不能是目标服务本身，否则会无限回环';
+        act = { kind: 'mirror', target: st.mTarget, pct: clampInt(st.mPct, 1, 100, 10) };
+      } else if (st.act === 'retry') {
+        act = {
+          kind: 'retry', times: clampInt(st.rTimes, 1, 10, 3),
+          timeout: clampInt(st.rTimeout, 50, 60000, 800),
+          backoff: clampInt(st.rBackoff, 0, 5000, 25), on: st.rOn || '5xx'
+        };
+      } else if (st.act === 'circuit') {
+        act = {
+          kind: 'circuit', fails: clampInt(st.cFails, 1, 100, 5),
+          isolate: clampInt(st.cIsolate, 1, 3600, 30), judge: st.cJudge || '5xx',
+          half: clampInt(st.cHalf, 1, 20, 3)
+        };
+      } else if (st.act === 'outlier') {
+        act = {
+          kind: 'outlier', pct: clampInt(st.oPct, 1, 100, 50),
+          base: clampInt(st.oBase, 1, 3600, 30), interval: clampInt(st.oInterval, 1, 600, 10),
+          fails: clampInt(st.oFails, 1, 100, 5)
+        };
+      } else {
+        return '请选择动作类型';
+      }
+
+      if (item) {
+        Object.assign(item, {
+          name, type: st.type, host: st.host, ns: target.ns, match, act,
+          status: st.enable === false ? '已停用' : '生效中',
+          updated: '刚刚', by: DB.user.name
+        });
+      } else {
+        list.unshift({
+          id: `rule-${Date.now().toString(36)}`,
+          name, type: st.type, host: st.host, ns: target.ns, match, act,
+          status: '生效中', hits: '0/s', updated: '刚刚', by: DB.user.name
+        });
+      }
+      saveSnapshot();
+      route();
+      toast(item ? `规则 ${name} 已下发` : `规则 ${name} 已创建并生效`, 'ok');
+    }
+  });
+}
+function ruleToggle(id) {
+  const r = DB.mesh.rules.find(x => x.id === id);
+  if (!r) return;
+  r.status = r.status === '生效中' ? '已停用' : '生效中';
+  r.updated = '刚刚';
+  r.by = DB.user.name;
+  saveSnapshot();
+  route();
+  toast(`规则 ${r.name} 已${r.status === '生效中' ? '启用' : '停用'}`, 'ok');
+}
+function ruleDelete(id) {
+  const r = DB.mesh.rules.find(x => x.id === id);
+  if (!r) return;
+  openModal({
+    title: '删除流量规则',
+    desc: `${r.name} · ${r.type} · ${r.host}`,
+    danger: true,
+    okText: '确认删除',
+    body: `<p style="margin:0;font-size:12.5px;color:var(--text-2)">删除后该规则立即从数据面移除，命中它的流量回到默认路由——灰度、重试与熔断保护同时失效。</p>`,
+    onOk: () => {
+      DB.mesh.rules = DB.mesh.rules.filter(x => x.id !== id);
+      saveSnapshot();
+      route();
+      toast('规则已删除', 'warn');
+    }
+  });
 }
 
 function viewMeshTopology() {
@@ -4335,47 +4681,404 @@ function edgeBanner() {
   </div>`;
 }
 
+/* ==========================================================
+   云边端 · 边缘节点纳管
+   ========================================================== */
+/* 节点字段补齐：历史数据与新建节点共用同一套派生逻辑 */
+function normalizeEdge() {
+  DB.edge.nodes.forEach((n, i) => {
+    if (!n.id) n.id = `edge-${i + 1}`;
+    if (!n.cluster) n.cluster = /cd-|成都|西南/.test(n.region) ? 'edge-cd-store' : 'edge-sh-store';
+    if (!n.ip) n.ip = `10.${62 + (i % 6)}.${12 + (i * 3) % 240}.${21 + (i * 7) % 200}`;
+    if (!n.cores) n.cores = n.type === '边缘服务器' ? 8 : n.type === '边缘网关' ? 2 : 4;
+    if (!n.disk) n.disk = 28 + ((i * 17) % 58);
+    if (!n.labels) {
+      const city = String(n.region).split('·')[0].trim();
+      n.labels = ['env=store', `city=${city}`, `node=${n.name}`];
+    }
+    if (typeof n.cordoned !== 'boolean') n.cordoned = false;
+    if (!n.joinedAt) n.joinedAt = `2026-0${1 + (i % 8)}-${pad2(3 + (i * 2) % 24)}`;
+    if (!n.agent) n.agent = n.ver && n.ver !== '—' ? n.ver : 'v1.8.2';
+    if (!n.runtime) n.runtime = 'containerd 1.7.11';
+    if (!n.note) n.note = '';
+    n.wl = edgeWorkloadsOn(n).length;
+  });
+}
+/* 全平台所有调度位置为「边缘」的工作负载 */
+function edgeWorkloadPool() {
+  const out = [];
+  DB.apps.forEach(a => a.components.forEach(c => c.workloads.forEach(w => {
+    if (w.where !== '边缘') return;
+    out.push({
+      appId: a.id, app: a.name, comp: c.name, name: w.name,
+      kind: w.kind, image: imgRef(c, w), cpu: w.cpu, mem: w.mem, w
+    });
+  })));
+  return out;
+}
+/* 某节点上运行的工作负载：按节点序号轮转分配，保证同一份数据前后一致 */
+function edgeWorkloadsOn(n) {
+  if (!n || n.status === '离线' || n.status === '待激活') return [];
+  const pool = edgeWorkloadPool();
+  const idx = Math.max(0, DB.edge.nodes.indexOf(n));
+  return pool.filter((w, i) => (i + idx) % 3 !== 0);
+}
+function nodeShare(n) {
+  const list = edgeWorkloadsOn(n);
+  const pool = Math.max(1, edgeWorkloadPool().length);
+  return Math.round(list.length / pool * 100);
+}
+function nodeMetrics(n) {
+  const r = mulberry32(wHash(n.name + 'nm'));
+  const lat = parseInt(n.latency, 10) || 16;
+  const cpuBase = n.cpu || 40, memBase = n.mem || 50, diskBase = n.disk || 40;
+  const band = (base, spread, lo, hi) => [Math.max(lo, base - spread), Math.min(hi, base + spread)];
+  const rd = a => a.map(v => Math.round(v));
+  const cpu = rd(anchor(walk(r, 60, cpuBase, 7, ...band(cpuBase, 24, 2, 99), true), cpuBase));
+  const mem = rd(anchor(walk(r, 60, memBase, 4, ...band(memBase, 14, 4, 99)), memBase));
+  const latS = rd(anchor(walk(r, 60, lat, lat * 0.3, Math.max(2, lat * 0.55), lat * 2.2, true), lat));
+  const disk = rd(anchor(walk(r, 60, diskBase, 1.2, ...band(diskBase, 5, 5, 99)), diskBase));
+  return { cpu, mem, lat: latS, disk };
+}
+function nodeEvents(n) {
+  if (n.status === '待激活') {
+    return [{ t: '—', type: 'Warning', reason: 'AwaitingAgent', msg: '等待门店侧执行接入命令完成注册，接入令牌 24 小时内有效' }];
+  }
+  if (n.status === '离线') {
+    return [
+      { t: '2 小时前', type: 'Warning', reason: 'HeartbeatLost', msg: `与云端心跳中断超过 90s，节点标记 NotReady；本地工作负载仍按离线策略运行` },
+      { t: '2 小时前', type: 'Normal', reason: 'NodeNotReady', msg: 'kubelet 未上报状态，调度器已停止向该节点分配新实例' }
+    ];
+  }
+  const list = [
+    { t: '今天 08:04', type: 'Normal', reason: 'NodeReady', msg: `kubelet 上报就绪，容器运行时 ${n.runtime}` },
+    { t: '今天 08:06', type: 'Normal', reason: 'ImagePreloaded', msg: `镜像预热完成，本地缓存 ${3 + (n.wl % 4)} 个边缘镜像` },
+    { t: '今天 09:20', type: 'Normal', reason: 'SyncSucceeded', msg: '增量同步完成，期望状态与云端一致' }
+  ];
+  if (n.status === '告警') {
+    list.unshift({ t: '12 分钟前', type: 'Warning', reason: 'HighCPUUsage', msg: `节点 CPU 使用率 ${n.cpu}%，超过 85% 阈值，边缘推理实例可能被限流` });
+    list.unshift({ t: '6 分钟前', type: 'Warning', reason: 'HeartbeatDelay', msg: '心跳延迟 8.4s，云边链路出现抖动' });
+  }
+  return list;
+}
+
 function viewEdgeNodes() {
   setCrumb('边缘节点');
   if (!S.modules.edge) return moduleOffPage('edge', '云边端协同', '边缘节点纳管依赖该模块。启用后可纳管门店边缘节点并下发边缘工作负载。');
-  const on = DB.edge.nodes.filter(n => n.status === '在线').length;
+  const nodes = DB.edge.nodes;
+  const on = nodes.filter(n => n.status === '在线').length;
+  const warn = nodes.filter(n => n.status === '告警').length;
+  const off = nodes.filter(n => n.status === '离线').length;
+  const pend = nodes.filter(n => n.status === '待激活').length;
+  const cities = new Set(nodes.map(n => String(n.region).split('·')[0].trim())).size;
+  const wlSum = nodes.reduce((s, n) => s + (n.wl || 0), 0);
+  const feeding = nodes.filter(n => (n.wl || 0) > 0).length;
+  const lats = nodes.map(n => parseInt(n.latency, 10)).filter(v => !isNaN(v));
+  const latAvg = lats.length ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length) : 0;
   return `
   <div class="page-head">
     <div><div class="ttl">边缘节点</div><div class="sub">门店边缘侧算力纳管，支持离线自治与联网后增量同步。</div></div>
-    <div class="acts"><button class="btn">接入指引</button><button class="btn primary" onclick="toast('添加边缘节点（原型）')">${icon('plus', '', 14)}添加节点</button></div>
+    <div class="acts">
+      <button class="btn" onclick="toast('接入指引：门店侧安装 Agent → 执行接入命令 → 云端自动纳管')">接入指引</button>
+      <button class="btn primary" onclick="addEdgeNode()">${icon('plus', '', 14)}添加节点</button>
+    </div>
   </div>
   ${edgeBanner()}
   ${edgeTabs('/edge/nodes')}
   <div class="grid g4" style="margin-bottom:14px">
-    <div class="stat"><div class="lab">边缘节点</div><div class="val">8</div><div class="foot">覆盖 5 个城市</div></div>
-    <div class="stat"><div class="lab">在线率</div><div class="val">${(on / 8 * 100).toFixed(1)}<small>%</small></div><div class="foot"><span class="down">1</span> 离线 · <span class="warn" style="color:var(--warning);font-weight:600">1</span> 告警</div></div>
-    <div class="stat"><div class="lab">边缘工作负载</div><div class="val">41</div><div class="foot">跨 8 个节点调度</div></div>
-    <div class="stat"><div class="lab">平均回源延迟</div><div class="val">14<small>ms</small></div><div class="foot">云边链路健康</div></div>
+    <div class="stat"><div class="lab">边缘节点</div><div class="val">${nodes.length}</div><div class="foot">覆盖 ${cities} 个城市</div></div>
+    <div class="stat"><div class="lab">在线率</div><div class="val">${nodes.length ? (on / nodes.length * 100).toFixed(1) : '0.0'}<small>%</small></div>
+      <div class="foot"><span class="down">${off}</span> 离线 · <span style="color:var(--warning);font-weight:600">${warn}</span> 告警${pend ? ` · ${pend} 待激活` : ''}</div></div>
+    <div class="stat"><div class="lab">边缘工作负载</div><div class="val">${wlSum}</div><div class="foot">跨 ${feeding} 个节点调度</div></div>
+    <div class="stat"><div class="lab">平均回源延迟</div><div class="val">${latAvg}<small>ms</small></div><div class="foot">${off ? '<span style="color:var(--danger)">含离线节点，仅统计在线</span>' : '云边链路健康'}</div></div>
   </div>
   <div class="card">
     <div class="toolbar">
       <div class="search" style="margin:0;width:220px">${icon('search', '', 14)}<input placeholder="搜索节点 / 区域" oninput="listFilter('#nodeTable', this.value)" /></div>
       <button class="filter-pill on" onclick="listStatus('#nodeTable','all',this)">全部</button>
       <button class="filter-pill" onclick="listStatus('#nodeTable','在线',this)">在线</button>
+      <button class="filter-pill" onclick="listStatus('#nodeTable','告警',this)">告警</button>
       <button class="filter-pill" onclick="listStatus('#nodeTable','离线',this)">离线</button>
-      <div class="grow"><span class="tiny muted" style="align-self:center">节点版本 v1.8.2 统一</span></div>
+      ${pend ? `<button class="filter-pill" onclick="listStatus('#nodeTable','待激活',this)">待激活</button>` : ''}
+      <div class="grow"><span class="tiny muted" style="align-self:center">Agent 版本 v1.8.2 统一</span></div>
     </div>
     <table class="table" id="nodeTable">
       <thead><tr><th>节点</th><th>位置</th><th>类型</th><th>CPU</th><th>内存</th><th>回源延迟</th><th>工作负载</th><th>最近同步</th><th>状态</th></tr></thead>
-      <tbody>${DB.edge.nodes.map(n => `
-        <tr class="clickable" data-q="${esc(n.name)} ${esc(n.region)} ${esc(n.type)}" data-status="${esc(n.status)}" onclick="toast('节点详情 ${n.name}（原型）')">
-          <td class="name mono" style="font-size:11.5px">${esc(n.name)}<div class="sub">${esc(n.ver)}</div></td>
+      <tbody>${nodes.map(n => `
+        <tr class="clickable" data-q="${esc(n.name)} ${esc(n.region)} ${esc(n.type)}" data-status="${esc(n.status)}" onclick="goto('#/edge/nodes/${encodeURIComponent(n.name)}')">
+          <td class="name mono" style="font-size:11.5px">${esc(n.name)}<div class="sub">${esc(n.agent)} · ${esc(n.cluster)}</div></td>
           <td>${esc(n.region)}</td>
           <td><span class="chip">${esc(n.type)}</span></td>
           <td>${n.cpu ? `<div style="display:flex;align-items:center;gap:7px"><div class="progress thin" style="width:56px"><div class="${n.cpu > 80 ? 'bad' : n.cpu > 65 ? 'warn' : 'ok'}" style="width:${n.cpu}%"></div></div><span class="num">${n.cpu}%</span></div>` : '<span class="muted">—</span>'}</td>
           <td>${n.mem ? `<div style="display:flex;align-items:center;gap:7px"><div class="progress thin" style="width:56px"><div class="${n.mem > 85 ? 'bad' : n.mem > 70 ? 'warn' : 'ok'}" style="width:${n.mem}%"></div></div><span class="num">${n.mem}%</span></div>` : '<span class="muted">—</span>'}</td>
-          <td class="num">${n.latency}</td>
-          <td class="num">${n.wl}</td>
-          <td class="tiny muted">${n.sync}</td>
-          <td>${badge(n.status)}</td>
+          <td class="num">${esc(n.latency)}</td>
+          <td class="num">${n.wl || 0}</td>
+          <td class="tiny muted">${esc(n.sync)}</td>
+          <td>${badge(n.status)}${n.cordoned ? ' <span class="badge muted">已封锁</span>' : ''}</td>
         </tr>`).join('')}</tbody>
     </table>
   </div>`;
+}
+
+function nodeMetricsBlock(n) {
+  if (n.status === '离线' || n.status === '待激活') {
+    return `<div class="card"><div class="empty" style="padding:34px 16px">
+      <h3>${n.status === '离线' ? '节点离线，暂无实时指标' : '节点尚未激活'}</h3>
+      <p>${n.status === '离线' ? '最后上报时间 ' + esc(n.sync) + '。节点恢复联网后会自动续传指标与事件。' : '门店侧完成注册后开始上报 CPU、内存与回源延迟。'}</p>
+    </div></div>`;
+  }
+  const m = nodeMetrics(n);
+  return `<div class="grid g3" style="margin-bottom:14px">
+    ${chartCard('CPU 使用率', `${n.cores} 核 · 近 1 小时`, m.cpu, { unit: '%', color: '#2563eb', labels: axisLabels('1h'), fmt: v => Math.round(v) })}
+    ${chartCard('内存使用率', '含边缘缓存 · 近 1 小时', m.mem, { unit: '%', color: '#0d9488', labels: axisLabels('1h'), fmt: v => Math.round(v) })}
+    ${chartCard('回源延迟', '边缘节点 → 云端网关', m.lat, { unit: 'ms', color: '#c2760a', labels: axisLabels('1h'), fmt: v => Math.round(v) })}
+  </div>`;
+}
+
+function viewEdgeNode(name) {
+  if (!S.modules.edge) return moduleOffPage('edge', '云边端协同', '边缘节点纳管依赖该模块。');
+  const n = DB.edge.nodes.find(x => x.name === name);
+  setCrumb('边缘节点');
+  if (!n) {
+    return `<div class="card"><div class="empty" style="padding:60px 20px">
+      <h3>找不到节点 ${esc(name)}</h3>
+      <p>它可能已被移除，或者链接里的节点名不匹配。</p>
+      <button class="btn primary" onclick="goto('#/edge/nodes')">返回节点列表</button>
+    </div></div>`;
+  }
+  const wls = edgeWorkloadsOn(n);
+  const devs = (DB.edge.devices || []).filter(d => d.node === n.name);
+  const evs = nodeEvents(n);
+  const live = n.status === '在线' || n.status === '告警';
+  return `
+  <div class="page-head">
+    <div>
+      <div style="display:flex;align-items:center;gap:9px">
+        <span class="link tiny" onclick="goto('#/edge/nodes')">边缘节点</span>
+        <span class="muted">/</span>
+        <span class="ttl" style="font-size:16px">${esc(n.name)}</span>
+        ${badge(n.status)}
+        ${n.cordoned ? '<span class="badge muted">已封锁调度</span>' : ''}
+      </div>
+      <div class="sub">${esc(n.region)} · <b>${esc(n.type)}</b> · 集群 <span class="mono">${esc(n.cluster)}</span> · Agent <span class="mono">${esc(n.agent)}</span></div>
+    </div>
+    <div class="acts">
+      ${n.status === '待激活' ? `<button class="btn primary" onclick="nodeActivate('${esc(n.name)}')">${icon('refresh', '', 14)}模拟上线</button>
+        <button class="btn" onclick="joinModal('${esc(n.name)}')">查看接入命令</button>` : `
+        <button class="btn" onclick="nodeSync('${esc(n.name)}')">${icon('refresh', '', 14)}立即同步</button>
+        <button class="btn" onclick="nodeCordon('${esc(n.name)}')">${n.cordoned ? '解除封锁' : '封锁调度'}</button>`}
+      <button class="btn danger" onclick="nodeRemove('${esc(n.name)}')">移除节点</button>
+    </div>
+  </div>
+  ${edgeBanner()}
+  ${edgeTabs('/edge/nodes')}
+
+  <div class="grid g4" style="margin-bottom:14px">
+    <div class="stat"><div class="lab">CPU</div><div class="val">${n.cpu || 0}<small>%</small></div>
+      <div class="foot"><div style="display:flex;align-items:center;gap:8px;width:100%"><div class="progress thin" style="flex:1"><div class="${n.cpu > 80 ? 'bad' : n.cpu > 65 ? 'warn' : 'ok'}" style="width:${n.cpu || 0}%"></div></div><span class="tiny muted" style="white-space:nowrap">${n.cores} 核</span></div></div></div>
+    <div class="stat"><div class="lab">内存</div><div class="val">${n.mem || 0}<small>%</small></div>
+      <div class="foot"><div style="display:flex;align-items:center;gap:8px;width:100%"><div class="progress thin" style="flex:1"><div class="${n.mem > 85 ? 'bad' : n.mem > 70 ? 'warn' : 'ok'}" style="width:${n.mem || 0}%"></div></div><span class="tiny muted" style="white-space:nowrap">含缓存</span></div></div></div>
+    <div class="stat"><div class="lab">本地磁盘</div><div class="val">${n.disk || 0}<small>%</small></div>
+      <div class="foot"><div style="display:flex;align-items:center;gap:8px;width:100%"><div class="progress thin" style="flex:1"><div class="${n.disk > 85 ? 'bad' : n.disk > 70 ? 'warn' : 'ok'}" style="width:${n.disk || 0}%"></div></div><span class="tiny muted" style="white-space:nowrap">镜像与日志</span></div></div></div>
+    <div class="stat"><div class="lab">本节点工作负载</div><div class="val">${wls.length}<small>个</small></div>
+      <div class="foot">端设备 <b>${devs.length}</b> 台 · 回源 ${esc(n.latency)}</div></div>
+  </div>
+
+  ${nodeMetricsBlock(n)}
+
+  <div class="grid g21" style="align-items:start">
+    <div class="card">
+      <div class="card-head"><div class="t">本节点工作负载</div><div class="r tiny muted">按节点标签 env=store 调度</div></div>
+      ${wls.length ? `<table class="table">
+        <thead><tr><th style="width:27%">工作负载</th><th style="width:19%">应用 / 组件</th><th style="width:31%">镜像</th><th class="right" style="width:9%">CPU</th><th class="right" style="width:9%">内存</th><th>状态</th></tr></thead>
+        <tbody>${wls.map((w, i) => `<tr class="clickable" onclick="goto('${wlUrl(w.appId, w.comp, w.name)}')">
+          <td class="name mono" style="font-size:11.5px">${esc(w.name)}<div class="sub">${esc(w.kind)}</div></td>
+          <td class="tiny">${esc(w.app)}<div class="sub">${esc(w.comp)}</div></td>
+          <td class="mono" style="font-size:10.5px;word-break:break-all" title="${esc(w.image)}">${esc(String(w.image).replace(/^[^/]+\//, ''))}</td>
+          <td class="num" style="white-space:nowrap">${esc(w.cpu)}</td>
+          <td class="num" style="white-space:nowrap">${esc(w.mem)}</td>
+          <td>${badge(n.status === '告警' && i === 0 ? '降级' : '运行中')}</td>
+        </tr>`).join('')}</tbody>
+      </table>` : `<div class="empty" style="padding:30px 16px">
+        <h3>该节点没有运行工作负载</h3><p>${n.status === '待激活' ? '节点激活后才会接收调度。' : '可以在「应用分发」里把边缘工作负载下发到该节点。'}</p>
+      </div>`}
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="card">
+        <div class="card-head"><div class="t">节点信息</div></div>
+        <div class="card-body">
+          <dl class="kv">
+            <dt>内网 IP</dt><dd class="mono" style="font-size:11.5px">${esc(n.ip)}</dd>
+            <dt>归属集群</dt><dd class="mono" style="font-size:11.5px">${esc(n.cluster)}</dd>
+            <dt>容器运行时</dt><dd class="mono" style="font-size:11.5px">${esc(n.runtime)}</dd>
+            <dt>接入时间</dt><dd>${esc(n.joinedAt)}</dd>
+            <dt>最近同步</dt><dd>${esc(n.sync)}</dd>
+            <dt>调度状态</dt><dd>${n.cordoned ? '<span class="badge muted">已封锁</span>' : '<span class="badge ok">可调度</span>'}</dd>
+          </dl>
+          <div class="sd-sec">节点标签</div>
+          <div style="display:flex;gap:5px;flex-wrap:wrap">${(n.labels || []).map(l => `<span class="chip">${esc(l)}</span>`).join('')}</div>
+          ${n.note ? `<div class="tiny muted" style="margin-top:10px;line-height:1.6">${esc(n.note)}</div>` : ''}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="t">端设备</div><div class="r tiny muted">${devs.length} 台</div></div>
+        ${devs.length ? `<table class="table">
+          <thead><tr><th>设备</th><th>协议</th><th>状态</th></tr></thead>
+          <tbody>${devs.map(d => `<tr class="clickable" onclick="goto('#/edge/devices')">
+            <td class="name mono" style="font-size:11px">${esc(d.id)}<div class="sub">${esc(d.type)} · ${esc(d.fw)}</div></td>
+            <td><span class="badge outline">${esc(d.proto)}</span></td>
+            <td>${badge(d.status)}</td>
+          </tr>`).join('')}</tbody>
+        </table>` : '<div class="empty" style="padding:22px 16px"><p style="margin:0" class="tiny">该节点还没有接入终端设备。</p></div>'}
+      </div>
+    </div>
+  </div>
+
+  <div class="card mt16">
+    <div class="card-head"><div class="t">节点事件</div><div class="r tiny muted">最近 24 小时</div></div>
+    <div class="card-body">
+      <div class="ev-list">
+        ${evs.map(e => `<div class="ev">
+          <i style="border-color:${e.type === 'Warning' ? 'var(--warning)' : 'var(--primary-line)'}"></i>
+          <div><div class="ev-t">${esc(e.t)} · ${esc(e.reason)}</div><div class="ev-x">${esc(e.msg)}</div></div>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+function joinCommand(n) {
+  return `curl -sSL https://console.cloudpaas.io/edge/join | sh -s -- --token ${n.token || 'edge-tk-pending'} --node ${n.name} --cluster ${n.cluster}`;
+}
+function joinModal(name) {
+  const n = DB.edge.nodes.find(x => x.name === name);
+  if (!n) return;
+  openModal({
+    title: `接入命令 · ${n.name}`,
+    desc: '在门店边缘设备上以 root 执行，Agent 会自动注册并从云端拉取离线包。',
+    okText: '复制命令',
+    cancelText: '关闭',
+    body: `<div class="cmd-box"><code>${esc(joinCommand(n))}</code></div>
+      <div class="tiny muted" style="margin-top:12px;line-height:1.8">
+        1. 设备需可访问 <span class="mono">console.cloudpaas.io:443</span>；<br>
+        2. 首次注册会上报 CPU / 内存 / 磁盘与已装容器运行时；<br>
+        3. 令牌 24 小时内有效，过期可在节点详情重新生成。
+      </div>`,
+    onOk: () => copyText(joinCommand(n))
+  });
+}
+function addEdgeNode() {
+  if (!S.modules.edge) return toast('请先启用「云边端协同」模块', 'warn');
+  const clusters = DB.clusters.filter(c => c.type.includes('边缘')).map(c => [c.name, c.name]);
+  formModal({
+    title: '添加边缘节点',
+    desc: '登记门店侧设备后生成接入令牌，Agent 执行接入命令即可完成注册。',
+    okText: '生成接入令牌',
+    wide: true,
+    body: `
+      <div class="form-row">
+        ${fField('节点名称', fInput('name', '', 'edge-sh-031'), '小写字母、数字与连字符，建议 edge-<城市>-<序号>', true)}
+        ${fField('设备类型', fSelect('type', ['边缘一体机', '边缘服务器', '边缘网关', '轻量工控机'], '边缘一体机'))}
+      </div>
+      <div class="form-row">
+        ${fField('部署位置', fInput('region', '', '上海 · 静安嘉里中心店'), '「城市 · 门店」，用于区域调度', true)}
+        ${fField('归属集群', fSelect('cluster', clusters.length ? clusters : [['edge-sh-store', 'edge-sh-store']], clusters.length ? clusters[0][0] : 'edge-sh-store'))}
+      </div>
+      ${fField('节点标签', fInput('labels', 'env=store', 'env=store,city=上海'), '逗号分隔，调度与分发策略按标签匹配')}
+      ${fField('备注', fInput('note', '', '可选，例如设备 SN 或机房位置'))}`,
+    onSubmit: st => {
+      const name = String(st.name || '').trim();
+      if (!NAME_RE.test(name)) return '节点名称只能是小写字母、数字与连字符';
+      if (DB.edge.nodes.some(n => n.name === name)) return `节点 ${name} 已存在`;
+      if (!st.region) return '请填写部署位置，例如「上海 · 静安嘉里中心店」';
+      const labels = String(st.labels || '').split(',').map(s => s.trim()).filter(Boolean);
+      const node = {
+        id: `edge-${Date.now().toString(36)}`,
+        name,
+        region: st.region,
+        type: st.type,
+        cluster: st.cluster,
+        cpu: 0, mem: 0, disk: 0,
+        latency: '—',
+        status: '待激活',
+        wl: 0,
+        ver: '—',
+        agent: 'v1.8.2',
+        sync: '—',
+        ip: '—',
+        cores: st.type === '边缘服务器' ? 8 : st.type === '边缘网关' ? 2 : 4,
+        labels: labels.length ? labels : ['env=store'],
+        cordoned: false,
+        joinedAt: nowStamp().slice(0, 10),
+        runtime: 'containerd 1.7.11',
+        note: st.note || '',
+        token: `edge-tk-${wHash(name).toString(36)}`
+      };
+      DB.edge.nodes.push(node);
+      saveSnapshot();
+      if (location.hash.startsWith('#/edge')) route();
+      toast(`节点 ${name} 已登记，等待 Agent 接入`, 'ok');
+      setTimeout(() => joinModal(name), 60);
+    }
+  });
+}
+function nodeSync(name) {
+  const n = DB.edge.nodes.find(x => x.name === name);
+  if (!n) return;
+  if (n.status === '离线') return toast('节点离线，恢复联网后会自动续传', 'warn');
+  n.sync = '刚刚';
+  saveSnapshot();
+  route();
+  toast('已下发增量同步，期望状态与云端一致', 'ok');
+}
+function nodeCordon(name) {
+  const n = DB.edge.nodes.find(x => x.name === name);
+  if (!n) return;
+  n.cordoned = !n.cordoned;
+  saveSnapshot();
+  route();
+  toast(n.cordoned ? '已封锁调度：不再向该节点分配新实例，存量实例继续运行' : '已解除封锁，节点恢复接收调度', n.cordoned ? 'warn' : 'ok');
+}
+function nodeActivate(name) {
+  const n = DB.edge.nodes.find(x => x.name === name);
+  if (!n) return;
+  const r = mulberry32(wHash(n.name + 'act'));
+  n.status = '在线';
+  n.cpu = 18 + Math.floor(r() * 24);
+  n.mem = 32 + Math.floor(r() * 26);
+  n.disk = 26 + Math.floor(r() * 20);
+  n.latency = `${8 + Math.floor(r() * 12)}ms`;
+  n.ver = 'v1.8.2';
+  n.sync = '刚刚';
+  n.ip = `10.${62 + Math.floor(r() * 6)}.${12 + Math.floor(r() * 200)}.${21 + Math.floor(r() * 200)}`;
+  normalizeEdge();
+  saveSnapshot();
+  route();
+  toast(`节点 ${name} 已激活，开始接收调度`, 'ok');
+}
+function nodeRemove(name) {
+  const n = DB.edge.nodes.find(x => x.name === name);
+  if (!n) return;
+  const wl = edgeWorkloadsOn(n).length;
+  const devs = (DB.edge.devices || []).filter(d => d.node === name).length;
+  openModal({
+    title: '移除边缘节点',
+    desc: `${n.name} · ${n.region}`,
+    danger: true,
+    okText: '确认移除',
+    body: `<div class="danger-box">
+        该节点上的 <b>${wl}</b> 个工作负载实例会被重新调度到其他在线节点${devs ? `，<b>${devs}</b> 台端设备会回到「未绑定」状态` : ''}。
+        门店侧 Agent 需要手动卸载后才会停止上报。
+      </div>`,
+    onOk: () => {
+      DB.edge.devices.forEach(d => { if (d.node === name) d.node = '未绑定'; });
+      DB.edge.nodes = DB.edge.nodes.filter(x => x.name !== name);
+      saveSnapshot();
+      goto('#/edge/nodes');
+      toast('节点已移除', 'warn');
+    }
+  });
 }
 
 function viewEdgeDistribute() {
@@ -4384,7 +5087,7 @@ function viewEdgeDistribute() {
   return `
   <div class="page-head">
     <div><div class="ttl">应用分发</div><div class="sub">把「应用 - 组件 - 工作负载」按策略下发到边缘节点，支持灰度、分批与离线自治。</div></div>
-    <div class="acts"><button class="btn primary" onclick="toast('新建分发任务（原型）')">${icon('send', '', 14)}新建分发</button></div>
+    <div class="acts"><button class="btn primary" onclick="newDist()">${icon('send', '', 14)}新建分发</button></div>
   </div>
   ${edgeBanner()}
   ${edgeTabs('/edge/distribute')}
@@ -4422,7 +5125,7 @@ function viewEdgeDistribute() {
       <table class="table">
         <thead><tr><th>应用 / 组件</th><th>工作负载</th><th>版本</th><th>目标</th><th>策略</th><th>进度</th><th>状态</th><th class="right">时间</th></tr></thead>
         <tbody>${DB.edge.dist.map(d => `
-          <tr class="clickable" onclick="toast('分发详情（原型）')">
+          <tr class="clickable" onclick="distDetail('${d.id}')">
             <td class="name">${esc(d.app)}<div class="sub">${esc(d.comp)}</div></td>
             <td class="mono" style="font-size:11px">${esc(d.wl)}</td>
             <td><span class="chip">${esc(d.ver)}</span></td>
@@ -4450,10 +5153,18 @@ function viewEdgeDevices() {
   ${edgeBanner()}
   ${edgeTabs('/edge/devices')}
   <div class="grid g4" style="margin-bottom:14px">
-    <div class="stat"><div class="lab">接入设备</div><div class="val">150</div><div class="foot">4 类协议 · MQTT / BLE / RTSP / HTTP</div></div>
-    <div class="stat"><div class="lab">在线</div><div class="val" style="color:var(--success)">146</div><div class="foot">在线率 97.3%</div></div>
-    <div class="stat"><div class="lab">告警</div><div class="val" style="color:var(--warning)">1</div><div class="foot">POS 心跳抖动</div></div>
-    <div class="stat"><div class="lab">离线</div><div class="val" style="color:var(--danger)">3</div><div class="foot">所属节点 edge-cd-011 离线</div></div>
+    ${(() => {
+      const ds = DB.edge.devices;
+      const on = ds.filter(d => d.status === '在线').length;
+      const warn = ds.filter(d => d.status === '告警').length;
+      const off = ds.filter(d => d.status === '离线').length;
+      const protos = [...new Set(ds.map(d => d.proto))];
+      const offNodes = [...new Set(ds.filter(d => d.status === '离线').map(d => d.node))].filter(n => n !== '未绑定');
+      return `<div class="stat"><div class="lab">接入设备</div><div class="val">${ds.length}</div><div class="foot">${protos.length} 类协议 · ${protos.join(' / ') || '—'}</div></div>
+        <div class="stat"><div class="lab">在线</div><div class="val" style="color:var(--success)">${on}</div><div class="foot">在线率 ${ds.length ? (on / ds.length * 100).toFixed(1) : '0.0'}%</div></div>
+        <div class="stat"><div class="lab">告警</div><div class="val" style="color:var(--warning)">${warn}</div><div class="foot">${warn ? '心跳抖动或固件异常' : '无告警设备'}</div></div>
+        <div class="stat"><div class="lab">离线</div><div class="val" style="color:var(--danger)">${off}</div><div class="foot">${off ? (offNodes.length ? '所属节点 ' + offNodes.join('、') + ' 异常' : '设备未绑定节点') : '全部在线'}</div></div>`;
+    })()}
   </div>
   <div class="card">
     <div class="toolbar">
@@ -4467,7 +5178,7 @@ function viewEdgeDevices() {
     <table class="table" id="devTable">
       <thead><tr><th>设备 ID</th><th>类型</th><th>协议</th><th>所属边缘节点</th><th>固件</th><th>最近心跳</th><th>状态</th></tr></thead>
       <tbody>${DB.edge.devices.map(d => `
-        <tr class="clickable" data-q="${esc(d.id)} ${esc(d.type)} ${esc(d.node)}" data-status="${esc(d.type)}" onclick="toast('设备详情 ${d.id}（原型）')">
+        <tr class="clickable" data-q="${esc(d.id)} ${esc(d.type)} ${esc(d.node)}" data-status="${esc(d.type)}" onclick="deviceDetail('${d.id}')">
           <td class="name mono" style="font-size:11.5px">${esc(d.id)}</td>
           <td><span class="chip">${esc(d.type)}</span></td>
           <td><span class="badge outline">${esc(d.proto)}</span></td>
@@ -4493,30 +5204,358 @@ function moduleOffPage(key, name, why) {
 }
 
 /* ---------- 集群 ---------- */
+/* ==========================================================
+   运维中心 · 集群纳管
+   ========================================================== */
+function normalizeClusters() {
+  DB.clusters.forEach((c, i) => {
+    if (!c.id) c.id = `cl-${i + 1}`;
+    if (!c.provider) c.provider = c.type.includes('边缘') ? '自建 K3s' : /staging|dev/.test(c.name) ? '阿里云 ACK' : '阿里云 ACK';
+    if (!c.apiServer) c.apiServer = `https://${c.name}.k8s.corp.io:6443`;
+    if (!c.namespaces) c.namespaces = c.type.includes('边缘') ? 6 : 14;
+    if (!c.createdAt) c.createdAt = `2025-${pad2(3 + (i * 2) % 9)}-${pad2(5 + (i * 3) % 20)}`;
+    if (!c.cni) c.cni = c.type.includes('边缘') ? 'flannel' : 'cilium 1.16';
+    if (!c.podCap) c.podCap = c.type.includes('边缘') ? c.nodes * 32 : c.nodes * 48;
+    if (!c.note) c.note = '';
+  });
+}
+function clusterNodes(c) {
+  const r = mulberry32(wHash(c.name + 'node'));
+  const total = Math.min(c.nodes || 0, 60);
+  const cp = c.type.includes('边缘') ? 1 : 3;
+  const list = [];
+  for (let i = 0; i < total; i++) {
+    const role = i < cp ? 'control-plane' : 'worker';
+    const pods = role === 'control-plane' ? 6 + Math.floor(r() * 8) : 12 + Math.floor(r() * 22);
+    list.push({
+      name: `${c.name}-node-${pad2(i + 1)}`,
+      role,
+      ver: String(c.ver).split(' ·')[0],
+      status: c.status === '离线' || c.status === '接入中' ? c.status : (c.status === '维护中' && i === total - 1 ? '维护中' : '就绪'),
+      cpu: c.cpu ? Math.max(2, Math.min(96, c.cpu + Math.round((r() - 0.5) * 34))) : 0,
+      mem: c.mem ? Math.max(4, Math.min(96, c.mem + Math.round((r() - 0.5) * 24))) : 0,
+      pods: c.status === '离线' || c.status === '接入中' ? 0 : pods
+    });
+  }
+  return list;
+}
+function clusterMetrics(c) {
+  const r = mulberry32(wHash(c.name + 'metric'));
+  const cpuBase = c.cpu || 0, memBase = c.mem || 0;
+  const rd = a => a.map(v => Math.round(v));
+  return {
+    cpu: rd(anchor(walk(r, 60, cpuBase, 6, Math.max(1, cpuBase - 22), Math.min(99, cpuBase + 20), true), cpuBase)),
+    mem: rd(anchor(walk(r, 60, memBase, 4, Math.max(2, memBase - 12), Math.min(99, memBase + 12)), memBase))
+  };
+}
+function clusterEvents(c) {
+  if (c.status === '接入中') {
+    return [{ t: '刚刚', type: 'Normal', reason: 'AgentInstalling', msg: '已下发平台 Agent 清单，等待目标集群回报 CSR 与节点信息' }];
+  }
+  if (c.status === '离线') {
+    return [
+      { t: '3 小时前', type: 'Warning', reason: 'ClusterUnreachable', msg: 'API Server 连接超时，边缘集群可能断网；已启用离线自治' },
+      { t: '3 小时前', type: 'Warning', reason: 'MetricsMissing', msg: '指标采集中断，容量数据停留在断连前' }
+    ];
+  }
+  const list = [
+    { t: '今天 07:40', type: 'Normal', reason: 'NodeJoined', msg: `节点 ${c.name}-node-0${c.nodes} 通过引导加入集群，角色 worker` },
+    { t: '今天 09:12', type: 'Normal', reason: 'CertRotated', msg: 'kubelet 客户端证书自动轮换完成，有效期 90 天' }
+  ];
+  if (c.status === '维护中') list.unshift({ t: '1 小时前', type: 'Warning', reason: 'ClusterMaintenance', msg: '集群进入维护模式：停止调度新实例，存量实例保留' });
+  if (c.cpu > 70) list.unshift({ t: '25 分钟前', type: 'Warning', reason: 'HighCPU', msg: `集群 CPU 分配率 ${c.cpu}%，接近扩容阈值（80%）` });
+  return list;
+}
+function clusterBy(name) { return DB.clusters.find(c => c.name === name); }
+
 function viewClusters() {
   setCrumb('集群管理');
+  const list = DB.clusters;
+  const nodes = list.reduce((s, c) => s + (c.nodes || 0), 0);
+  const pods = list.reduce((s, c) => s + (c.pods || 0), 0);
+  const bad = list.filter(c => c.status === '离线' || c.status === '接入中').length;
   return `
   <div class="page-head">
     <div><div class="ttl">集群管理</div><div class="sub">云端 Kubernetes 集群与边缘 K3s 集群统一纳管。</div></div>
-    <div class="acts"><button class="btn primary" onclick="toast('接入集群（原型）')">${icon('plus', '', 14)}接入集群</button></div>
+    <div class="acts">
+      <button class="btn" onclick="toast('已刷新集群状态')">${icon('refresh', '', 14)}刷新</button>
+      <button class="btn primary" onclick="connectCluster()">${icon('plus', '', 14)}接入集群</button>
+    </div>
+  </div>
+  <div class="grid g4" style="margin-bottom:14px">
+    <div class="stat"><div class="lab">集群</div><div class="val">${list.length}</div><div class="foot">云端 ${list.filter(c => !c.type.includes('边缘')).length} · 边缘 ${list.filter(c => c.type.includes('边缘')).length}</div></div>
+    <div class="stat"><div class="lab">节点总数</div><div class="val">${nodes}</div><div class="foot">跨 ${new Set(list.map(c => c.region)).size} 个区域</div></div>
+    <div class="stat"><div class="lab">运行 Pod</div><div class="val">${pods}</div><div class="foot">调度位置含边缘</div></div>
+    <div class="stat"><div class="lab">需关注</div><div class="val" style="color:${bad ? 'var(--warning)' : 'inherit'}">${bad}</div><div class="foot">${bad ? list.filter(c => c.status === '离线' || c.status === '接入中').map(c => esc(c.name)).join(' · ') : '全部集群可用'}</div></div>
   </div>
   <div class="card">
     <table class="table">
-      <thead><tr><th>集群</th><th>类型</th><th>区域</th><th>版本</th><th>节点</th><th>CPU</th><th>内存</th><th>Pod</th><th>状态</th></tr></thead>
-      <tbody>${DB.clusters.map(c => `
-        <tr class="clickable" onclick="toast('集群详情（原型）')">
-          <td class="name mono" style="font-size:11.5px">${esc(c.name)}</td>
+      <thead><tr><th>集群</th><th>类型</th><th>区域</th><th>版本</th><th class="right">节点</th><th>CPU</th><th>内存</th><th class="right">Pod</th><th>状态</th></tr></thead>
+      <tbody>${list.map(c => `
+        <tr class="clickable" onclick="goto('#/ops/clusters/${encodeURIComponent(c.name)}')">
+          <td class="name mono" style="font-size:11.5px">${esc(c.name)}<div class="sub">${esc(c.provider)}</div></td>
           <td><span class="chip ${c.type.includes('边缘') ? 'teal' : ''}">${esc(c.type)}</span></td>
           <td>${esc(c.region)}</td>
           <td class="mono" style="font-size:11px">${esc(c.ver)}</td>
           <td class="num">${c.nodes}</td>
-          <td class="num">${c.cpu}%</td>
-          <td class="num">${c.mem}%</td>
+          <td><div style="display:flex;align-items:center;gap:7px"><div class="progress thin" style="width:56px"><div class="${c.cpu > 80 ? 'bad' : c.cpu > 65 ? 'warn' : 'ok'}" style="width:${c.cpu}%"></div></div><span class="num">${c.cpu}%</span></div></td>
+          <td><div style="display:flex;align-items:center;gap:7px"><div class="progress thin" style="width:56px"><div class="${c.mem > 85 ? 'bad' : c.mem > 70 ? 'warn' : 'ok'}" style="width:${c.mem}%"></div></div><span class="num">${c.mem}%</span></div></td>
           <td class="num">${c.pods}</td>
           <td>${badge(c.status)}</td>
         </tr>`).join('')}</tbody>
     </table>
   </div>`;
+}
+
+function viewCluster(name) {
+  const c = clusterBy(name);
+  setCrumb('集群管理');
+  if (!c) {
+    return `<div class="card"><div class="empty" style="padding:60px 20px">
+      <h3>找不到集群 ${esc(name)}</h3>
+      <p>它可能已被移除，或者链接里的集群名不匹配。</p>
+      <button class="btn primary" onclick="goto('#/ops/clusters')">返回集群列表</button>
+    </div></div>`;
+  }
+  const nodes = clusterNodes(c);
+  const ready = nodes.filter(n => n.status === '就绪').length;
+  const evs = clusterEvents(c);
+  const live = c.status === '健康' || c.status === '维护中';
+  const m = clusterMetrics(c);
+  const workloads = DB.apps.flatMap(a => a.components.flatMap(comp => comp.workloads
+    .filter(w => w.cluster === c.name)
+    .map(w => ({ app: a.name, appId: a.id, comp: comp.name, name: w.name, kind: w.kind, replicas: w.replicas || 0 }))));
+  return `
+  <div class="page-head">
+    <div>
+      <div style="display:flex;align-items:center;gap:9px">
+        <span class="link tiny" onclick="goto('#/ops/clusters')">集群管理</span>
+        <span class="muted">/</span>
+        <span class="ttl" style="font-size:16px">${esc(c.name)}</span>
+        ${badge(c.status)}
+      </div>
+      <div class="sub">${esc(c.type)} · ${esc(c.region)} · <span class="mono">${esc(c.ver)}</span> · 纳管于 ${esc(c.createdAt)}</div>
+    </div>
+    <div class="acts">
+      ${c.status === '接入中' ? `<button class="btn primary" onclick="clusterVerify('${esc(c.name)}')">${icon('refresh', '', 14)}完成接入校验</button>` : `
+        <button class="btn" onclick="clusterMaintain('${esc(c.name)}')">${c.status === '维护中' ? '结束维护' : '设为维护'}</button>`}
+      <button class="btn danger" onclick="clusterRemove('${esc(c.name)}')">移除集群</button>
+    </div>
+  </div>
+
+  ${c.status === '接入中' ? `<div class="approve-banner">
+    <div class="ic">${icon('cloud', '', 16)}</div>
+    <div class="tx">
+      <b>正在接入：Agent 清单已下发</b>
+      <p>目标集群执行安装命令后回报 CSR；校验通过即可接管调度。当前节点与容量数据尚未采集。</p>
+    </div>
+    <button class="btn sm primary" onclick="clusterVerify('${esc(c.name)}')">完成校验</button>
+  </div>` : ''}
+  ${c.status === '维护中' ? `<div class="approve-banner">
+    <div class="ic">${icon('shield', '', 16)}</div>
+    <div class="tx"><b>集群处于维护模式</b><p>调度器不再向该集群分配新实例，存量实例继续运行；发布流水线会跳过该集群。</p></div>
+  </div>` : ''}
+
+  <div class="grid g4" style="margin-bottom:14px">
+    <div class="stat"><div class="lab">节点</div><div class="val">${c.nodes}<small>台</small></div><div class="foot">就绪 <b>${ready}</b> · 容量上限 ${c.podCap} Pod</div></div>
+    <div class="stat"><div class="lab">运行 Pod</div><div class="val">${c.pods}<small>个</small></div><div class="foot">分配率 ${c.podCap ? Math.round(c.pods / c.podCap * 100) : 0}%</div></div>
+    <div class="stat"><div class="lab">CPU 分配率</div><div class="val">${c.cpu}<small>%</small></div>
+      <div class="foot"><div style="display:flex;align-items:center;gap:8px;width:100%"><div class="progress thin" style="flex:1"><div class="${c.cpu > 80 ? 'bad' : c.cpu > 65 ? 'warn' : 'ok'}" style="width:${c.cpu}%"></div></div><span class="tiny muted" style="white-space:nowrap">阈值 80%</span></div></div></div>
+    <div class="stat"><div class="lab">内存分配率</div><div class="val">${c.mem}<small>%</small></div>
+      <div class="foot"><div style="display:flex;align-items:center;gap:8px;width:100%"><div class="progress thin" style="flex:1"><div class="${c.mem > 85 ? 'bad' : c.mem > 70 ? 'warn' : 'ok'}" style="width:${c.mem}%"></div></div><span class="tiny muted" style="white-space:nowrap">阈值 85%</span></div></div></div>
+  </div>
+
+  ${live ? `<div class="grid g2" style="margin-bottom:14px">
+    ${chartCard('CPU 分配率', '集群内所有节点 · 近 1 小时', m.cpu, { unit: '%', color: '#2563eb', labels: axisLabels('1h'), fmt: v => Math.round(v) })}
+    ${chartCard('内存分配率', '含缓存与系统预留 · 近 1 小时', m.mem, { unit: '%', color: '#0d9488', labels: axisLabels('1h'), fmt: v => Math.round(v) })}
+  </div>` : `<div class="card" style="margin-bottom:14px"><div class="empty" style="padding:30px 16px">
+    <h3>${c.status === '接入中' ? '接入尚未完成，暂无容量曲线' : '集群离线，指标采集中断'}</h3>
+    <p>${c.status === '接入中' ? '完成接入校验后开始采集 CPU、内存与 Pod 分配率。' : '边缘集群断网时进入离线自治，恢复连接后自动补齐指标。'}</p>
+  </div></div>`}
+
+  <div class="grid g21" style="align-items:start">
+    <div class="card">
+      <div class="card-head"><div class="t">节点</div><div class="r tiny muted">${ready} / ${nodes.length} 就绪</div></div>
+      <table class="table">
+        <thead><tr><th style="width:30%">节点</th><th style="width:19%">角色</th><th style="width:12%">状态</th><th style="width:12%">版本</th><th class="right" style="width:9%">CPU</th><th class="right" style="width:9%">内存</th><th class="right">Pod</th></tr></thead>
+        <tbody>${nodes.map(n => `<tr>
+          <td class="name mono" style="font-size:11.5px">${esc(n.name)}</td>
+          <td>${n.role === 'control-plane' ? '<span class="chip blue">control-plane</span>' : '<span class="chip">worker</span>'}</td>
+          <td>${badge(n.status === '就绪' ? '在线' : n.status)}</td>
+          <td class="mono" style="font-size:10.5px">${esc(n.ver)}</td>
+          <td class="num">${n.cpu}%</td>
+          <td class="num">${n.mem}%</td>
+          <td class="num">${n.pods}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="card">
+        <div class="card-head"><div class="t">集群信息</div></div>
+        <div class="card-body">
+          <dl class="kv">
+            <dt>API Server</dt><dd class="mono" style="font-size:11px;word-break:break-all">${esc(c.apiServer)}</dd>
+            <dt>接入方式</dt><dd>${esc(c.provider)}</dd>
+            <dt>容器网络</dt><dd class="mono" style="font-size:11.5px">${esc(c.cni)}</dd>
+            <dt>命名空间</dt><dd>${c.namespaces} 个</dd>
+            <dt>承载工作负载</dt><dd>${workloads.length} 个 · ${workloads.reduce((s, w) => s + w.replicas, 0)} 实例</dd>
+          </dl>
+          ${c.note ? `<div class="tiny muted" style="margin-top:10px;line-height:1.6">${esc(c.note)}</div>` : ''}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="t">承载的应用</div><div class="r tiny muted">${new Set(workloads.map(w => w.app)).size} 个应用 · ${workloads.length} 个工作负载</div></div>
+        ${workloads.length ? `<table class="table">
+          <thead><tr><th>工作负载</th><th class="right">副本</th></tr></thead>
+          <tbody>${workloads.slice().sort((a, b) => b.replicas - a.replicas).slice(0, 7).map(w => `<tr class="clickable" onclick="goto('${wlUrl(w.appId, w.comp, w.name)}')">
+            <td class="name mono" style="font-size:11px">${esc(w.name)}<div class="sub">${esc(w.app)} / ${esc(w.comp)}</div></td>
+            <td class="num">${w.replicas}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+        ${workloads.length > 7 ? `<div class="cfg-foot">另有 ${workloads.length - 7} 个工作负载调度在本集群，可在「工作负载」页按调度位置筛选。</div>` : ''}` : `<div class="empty" style="padding:22px 16px"><p style="margin:0" class="tiny">该集群还没有调度业务工作负载。</p></div>`}
+      </div>
+    </div>
+  </div>
+
+  <div class="card mt16">
+    <div class="card-head"><div class="t">集群事件</div><div class="r tiny muted">最近 24 小时</div></div>
+    <div class="card-body">
+      <div class="ev-list">
+        ${evs.map(e => `<div class="ev">
+          <i style="border-color:${e.type === 'Warning' ? 'var(--warning)' : 'var(--primary-line)'}"></i>
+          <div><div class="ev-t">${esc(e.t)} · ${esc(e.reason)}</div><div class="ev-x">${esc(e.msg)}</div></div>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+function connectCluster() {
+  const provs = [['阿里云 ACK', '阿里云 ACK'], ['腾讯云 TKE', '腾讯云 TKE'], ['自建 K8s', '自建 K8s'], ['自建 K3s（边缘）', '自建 K3s（边缘）']];
+  formModal({
+    title: '接入集群',
+    desc: '平台通过 Agent 接管目标集群的调度与发布；原有工作负载不受影响。',
+    okText: '生成接入清单',
+    wide: true,
+    body: `
+      <div class="form-row">
+        ${fField('集群名称', fInput('name', '', 'prod-guangzhou-01'), '小写字母、数字与连字符，需全局唯一', true)}
+        ${fField('接入方式', fSelect('provider', provs, provs[0][0], ' onchange="connectKindChange()"'))}
+      </div>
+      <div class="form-row">
+        ${fField('区域', fInput('region', '', '华南 · 广州'), '用于调度与容灾拓扑', true)}
+        ${fField('Kubernetes 版本', fSelect('ver', ['v1.29.4', 'v1.28.9', 'v1.28.6 · K3s', 'v1.27.11'], 'v1.29.4'))}
+      </div>
+      <div class="form-row">
+        ${fField('API Server', fInput('apiServer', '', 'https://10.0.0.12:6443'), 'Agent 回调与平台代理访问地址', true)}
+        ${fField('节点数', fInput('nodes', '3', '3', 'number'), '接入后以实际节点为准')}
+      </div>
+      ${fField('备注', fInput('note', '', '可选，例如机房或网络区域'))}
+      <div class="hint">接入后平台会校验 API Server 连通性、节点就绪与 RBAC 权限，校验通过才开始调度。</div>`,
+    onSubmit: st => {
+      const name = String(st.name || '').trim();
+      if (!NAME_RE.test(name)) return '集群名称只能是小写字母、数字与连字符';
+      if (DB.clusters.some(c => c.name === name)) return `集群 ${name} 已存在`;
+      if (!st.region) return '请填写区域，例如「华南 · 广州」';
+      if (!/^https?:\/\//.test(st.apiServer)) return 'API Server 需以 http:// 或 https:// 开头';
+      const nodes = clampInt(st.nodes, 1, 200, 3);
+      const edge = String(st.provider).includes('K3s') || String(st.ver).includes('K3s');
+      const cl = {
+        id: `cl-${Date.now().toString(36)}`,
+        name,
+        type: edge ? '边缘集群' : '云端 K8s',
+        region: st.region,
+        ver: st.ver,
+        nodes,
+        cpu: 0, mem: 0, pods: 0,
+        status: '接入中',
+        provider: st.provider,
+        apiServer: st.apiServer,
+        namespaces: 0,
+        cni: edge ? 'flannel' : 'cilium 1.16',
+        podCap: nodes * (edge ? 32 : 48),
+        createdAt: nowStamp().slice(0, 10),
+        note: st.note || '',
+        token: `cl-tk-${wHash(name).toString(36)}`
+      };
+      DB.clusters.push(cl);
+      saveSnapshot();
+      if (location.hash.startsWith('#/ops')) route();
+      toast(`集群 ${name} 已登记，等待接入校验`, 'ok');
+      setTimeout(() => clusterInstallModal(name), 60);
+    }
+  });
+}
+function connectKindChange() {
+  const mask = document.querySelector('.modal-mask:last-child');
+  if (!mask) return;
+  const d = readForm(mask);
+  const ver = mask.querySelector('[data-k=ver]');
+  if (ver && String(d.provider).includes('K3s') && !String(ver.value).includes('K3s')) ver.value = 'v1.28.6 · K3s';
+}
+function clusterInstallCommand(c) {
+  return `kubectl apply -f "https://console.cloudpaas.io/install/agent.yaml?cluster=${c.name}&token=${c.token || 'cl-tk-pending'}"`;
+}
+function clusterInstallModal(name) {
+  const c = clusterBy(name);
+  if (!c) return;
+  openModal({
+    title: `接入清单 · ${c.name}`,
+    desc: '在目标集群具备 cluster-admin 权限的上下文中执行；Agent 以 DaemonSet 形式部署。',
+    okText: '复制命令',
+    body: `<div class="cmd-box"><code>${esc(clusterInstallCommand(c))}</code></div>
+      <div class="tiny muted" style="margin-top:12px;line-height:1.8">
+        1. 平台校验 API Server 连通性与 CSR 审批权限；<br>
+        2. 节点就绪后自动打上 <span class="mono">platform.io/managed=true</span> 标签；<br>
+        3. 校验完成后回到集群详情点「完成接入校验」即可开始调度。
+      </div>`,
+    onOk: () => copyText(clusterInstallCommand(c))
+  });
+}
+function clusterVerify(name) {
+  const c = clusterBy(name);
+  if (!c) return;
+  const r = mulberry32(wHash(c.name + 'verify'));
+  c.status = '健康';
+  c.cpu = 22 + Math.floor(r() * 34);
+  c.mem = 34 + Math.floor(r() * 30);
+  c.pods = Math.round((c.nodes || 3) * (12 + Math.floor(r() * 16)));
+  c.namespaces = c.type.includes('边缘') ? 6 : 14;
+  saveSnapshot();
+  route();
+  toast(`集群 ${name} 接入完成，已开始采集容量指标`, 'ok');
+}
+function clusterMaintain(name) {
+  const c = clusterBy(name);
+  if (!c) return;
+  if (c.status === '接入中') return toast('集群仍在接入中，完成后才能切换维护模式', 'warn');
+  if (c.status === '离线') return toast('集群离线，无法切换维护模式', 'warn');
+  c.status = c.status === '维护中' ? '健康' : '维护中';
+  saveSnapshot();
+  route();
+  toast(c.status === '维护中' ? '已进入维护模式：停止调度新实例' : '已结束维护，恢复调度', c.status === '维护中' ? 'warn' : 'ok');
+}
+function clusterRemove(name) {
+  const c = clusterBy(name);
+  if (!c) return;
+  const wl = DB.apps.flatMap(a => a.components.flatMap(comp => comp.workloads.filter(w => w.cluster === name))).length;
+  openModal({
+    title: '移除集群',
+    desc: `${c.name} · ${c.region}`,
+    danger: true,
+    okText: '确认移除',
+    body: `<div class="danger-box">
+        平台会卸载 Agent 并停止同步，目标集群内的业务工作负载<b>不会被删除</b>。
+        ${wl ? `当前有 <b>${wl}</b> 个工作负载调度到该集群，移除后需要在其他集群重新编排。` : ''}
+      </div>`,
+    onOk: () => {
+      DB.clusters = DB.clusters.filter(x => x.name !== name);
+      saveSnapshot();
+      goto('#/ops/clusters');
+      toast('集群已移除', 'warn');
+    }
+  });
 }
 
 function viewAlerts() {
@@ -4554,6 +5593,392 @@ function viewAlerts() {
 }
 
 /* ---------- 模块管理（核心） ---------- */
+/* ==========================================================
+   平台管理 · 模块配置 / 文档
+   ========================================================== */
+function moduleConfig(key) {
+  const mesh = key === 'mesh';
+  DB.moduleCfg = DB.moduleCfg || {};
+  const cfg = (DB.moduleCfg[key] = DB.moduleCfg[key] || (mesh ? {
+    control: 'istiod.istio-system:15012', inject: '自动注入', mtls: '严格模式', rotate: '90', sample: '12.5'
+  } : {
+    control: 'edge-controller.cloudpaas:9443', offline: '72', sync: '30', window: '02:00 - 05:00', preload: '1'
+  }));
+  const body = mesh ? `
+    ${fField('控制面地址', fInput('control', cfg.control), 'istiod 的 gRPC 地址，Sidecar 通过它拉取配置')}
+    <div class="form-row">
+      ${fField('Sidecar 注入', fSelect('inject', ['自动注入', '手动注入', '不注入'], cfg.inject), '按命名空间标签决定是否注入')}
+      ${fField('mTLS 模式', fSelect('mtls', ['严格模式', '宽松模式', '关闭'], cfg.mtls))}
+    </div>
+    <div class="form-row">
+      ${fField('证书轮换周期 (天)', fInput('rotate', cfg.rotate, '90', 'number'))}
+      ${fField('链路采样率 (%)', fInput('sample', cfg.sample, '12.5', 'number'), '过高会显著增加 Collector 写入')}
+    </div>` : `
+    ${fField('控制面地址', fInput('control', cfg.control), '边缘控制器地址，节点通过它同步期望状态')}
+    <div class="form-row">
+      ${fField('离线自治时长 (小时)', fInput('offline', cfg.offline, '72', 'number'), '断网后本地继续运行的最长时间')}
+      ${fField('增量同步间隔 (秒)', fInput('sync', cfg.sync, '30', 'number'))}
+    </div>
+    <div class="form-row">
+      ${fField('默认分发窗口', fInput('window', cfg.window, '02:00 - 05:00'), '门店营业时段之外')}
+      ${fField('镜像预热', fSelect('preload', [['1', '开启'], ['0', '关闭']], cfg.preload || '1'), '低峰期提前拉取，避免首启等待')}
+    </div>`;
+  formModal({
+    title: `模块配置 · ${mesh ? 'Service Mesh' : '云边端协同'}`,
+    desc: '配置保存后下发到控制面，已建立的连接会在 30 秒内按新配置重建。',
+    okText: '保存并下发',
+    wide: true,
+    body,
+    onSubmit: st => {
+      if (!String(st.control || '').trim()) return '请填写控制面地址';
+      if (mesh) {
+        Object.assign(cfg, {
+          control: st.control, inject: st.inject, mtls: st.mtls,
+          rotate: String(clampInt(st.rotate, 7, 365, 90)),
+          sample: String(Math.max(0, Math.min(100, parseFloat(st.sample) || 0)))
+        });
+      } else {
+        Object.assign(cfg, {
+          control: st.control,
+          offline: String(clampInt(st.offline, 1, 720, 72)),
+          sync: String(clampInt(st.sync, 5, 600, 30)),
+          window: st.window || '02:00 - 05:00',
+          preload: st.preload === '1' ? '1' : '0'
+        });
+      }
+      saveSnapshot();
+      route();
+      toast('模块配置已下发', 'ok');
+    }
+  });
+}
+function moduleDocs(key) {
+  const mesh = key === 'mesh';
+  const sec = (t) => `<div class="sd-sec">${t}</div>`;
+  const cmd = (t) => `<div class="cmd-box" style="margin:6px 0 10px"><code>${esc(t)}</code></div>`;
+  const p = (t) => `<div class="tiny" style="color:var(--text-2);line-height:1.75">${t}</div>`;
+  openModal({
+    title: `${mesh ? 'Service Mesh' : '云边端协同'} · 模块文档`,
+    desc: '随平台内核 v4.2.0 提供，接口保持向后兼容。',
+    okText: '知道了',
+    cancelText: '关闭',
+    body: mesh ? `
+      ${sec('架构')}
+      ${p('控制面 istiod 负责配置分发与证书签发，数据面为每个 Pod 注入 Envoy Sidecar。业务容器与 Sidecar 之间走回环，出站流量由 iptables 透明劫持。')}
+      ${sec('常用命令')}
+      ${cmd('istioctl proxy-status                 # 查看 Sidecar 与控制面的同步状态')}
+      ${cmd('istioctl analyze -n retail-prod     # 校验虚拟服务与目标规则')}
+      ${sec('关键概念')}
+      ${p('<b>虚拟服务</b>决定请求怎么走（匹配条件 + 路由动作）；<b>目标规则</b>决定失败怎么办（重试、超时、熔断、异常点驱逐）。两者的 host 必须与 Kubernetes Service 名一致。')}
+      ${sec('排障建议')}
+      ${p('灰度不生效时先看 <span class="mono">proxy-status</span> 是否 SYNCED；再看请求头是否真的带了匹配条件。熔断触发可在「服务拓扑」页签观察实例被摘除的时间点。')}
+    ` : `
+      ${sec('架构')}
+      ${p('云端控制器维护期望状态，边缘节点上的 Agent 拉取清单并在本地 K3s 落地。断网时按最后一次期望状态运行，联网后做增量对账。')}
+      ${sec('接入流程')}
+      ${p('① 在「边缘节点」登记设备并生成令牌；② 门店侧执行接入命令安装 Agent；③ 节点上报容量后即可接收分发任务。')}
+      ${cmd('curl -sSL https://console.cloudpaas.io/edge/join | sh -s -- --token <token> --node <name>')}
+      ${sec('分发策略')}
+      ${p('支持按区域、节点标签选择目标，先灰度 2 个节点再全量；失败自动回滚上一版本。分发窗口默认 02:00 - 05:00，避开营业高峰。')}
+      ${sec('排障建议')}
+      ${p('分发卡在「灰度中」通常是目标节点离线或镜像拉取失败；可在分发详情查看逐节点进度与失败原因。')}
+    `
+  });
+}
+
+/* ==========================================================
+   平台管理 · 环境与角色
+   ========================================================== */
+function newEnv() {
+  const clusters = DB.clusters.map(c => [c.name, `${c.name} · ${c.region}`]);
+  if (!clusters.length) return toast('请先接入至少一个集群', 'warn');
+  const guards = ['严格模式', '标准模式', '宽松模式'];
+  formModal({
+    title: '新建环境',
+    desc: '环境绑定一个集群与一套变更策略；应用在不同环境间按提升顺序发布。',
+    okText: '创建环境',
+    wide: true,
+    body: `
+      <div class="form-row">
+        ${fField('环境名称', fInput('name', '', '灰度环境'), '展示名，可中文', true)}
+        ${fField('环境编码', fInput('code', '', 'gray'), '小写字母、数字与连字符，用于命名空间前缀', true)}
+      </div>
+      <div class="form-row">
+        ${fField('绑定集群', fSelect('cluster', clusters, clusters[0][0]), '一个环境只绑定一个集群', true)}
+        ${fField('变更策略', fSelect('guard', guards, '标准模式'), '严格模式需审批 + 灰度，宽松模式允许热更新')}
+      </div>
+      ${fField('说明', fInput('note', '', '例如：面向内部测试，每日 02:00 回收'), '发布页会展示这段说明')}`,
+    onSubmit: st => {
+      const name = String(st.name || '').trim();
+      const code = String(st.code || '').trim();
+      if (!name) return '请填写环境名称';
+      if (!/^[a-z][a-z0-9-]*$/.test(code)) return '环境编码需以小写字母开头，只含小写字母、数字与连字符';
+      if (DB.envs.some(e => e.name === name)) return `环境名称 ${name} 已存在`;
+      if (DB.envs.some(e => e.code === code)) return `环境编码 ${code} 已存在`;
+      const cl = DB.clusters.find(c => c.name === st.cluster) || {};
+      DB.envs.push({
+        name, code, cluster: st.cluster, region: cl.region || '—',
+        status: '健康', workloads: 0, apps: 0, guard: st.guard,
+        note: st.note || `${st.guard}：${st.guard === '严格模式' ? '变更需审批 + 灰度' : st.guard === '宽松模式' ? '允许热更新，每日回收' : '自动发布，允许热更新'}`
+      });
+      saveSnapshot();
+      route();
+      toast(`环境 ${name} 已创建`, 'ok');
+    }
+  });
+}
+function newRole() {
+  const scopes = [['全部资源', '全部资源'], ['按环境', '按环境'], ['按应用', '按应用'], ['仅本人创建', '仅本人创建']];
+  const perms = [['查看', '查看'], ['发布', '发布与回滚'], ['扩缩容', '扩缩容'], ['配置', '修改配置与密钥'], ['成员', '成员管理'], ['模块', '模块开关']];
+  formModal({
+    title: '新建角色',
+    desc: '角色按「数据范围 + 操作权限」组合；模块开关仅平台管理员可授予。',
+    okText: '创建角色',
+    wide: true,
+    body: `
+      <div class="form-row">
+        ${fField('角色名称', fInput('name', '', '应用运维'), '例如：应用负责人、值班运维', true)}
+        ${fField('数据范围', fSelect('scope', scopes, '按应用'), '决定能看到哪些应用与环境')}
+      </div>
+      <div class="form-sec">操作权限</div>
+      <div class="form-row">
+        ${perms.slice(0, 3).map(([k, n]) => fCheck('p_' + k, n, k === '查看')).join('')}
+      </div>
+      <div class="form-row">
+        ${perms.slice(3).map(([k, n]) => fCheck('p_' + k, n, false)).join('')}
+      </div>`,
+    onSubmit: st => {
+      const name = String(st.name || '').trim();
+      if (!name) return '请填写角色名称';
+      if (DB.roles.some(r => r.name === name)) return `角色 ${name} 已存在`;
+      const picked = perms.filter(([k]) => st['p_' + k]).map(([, n]) => n);
+      if (!picked.length) return '请至少选择一项操作权限';
+      if (picked.includes('查看') === false) return '「查看」是其它权限的前提，请一并勾选';
+      DB.roles.push({ name, users: 0, scope: st.scope, perm: picked.join(' / '), builtin: false });
+      saveSnapshot();
+      route();
+      toast(`角色 ${name} 已创建，可在成员管理里分配`, 'ok');
+    }
+  });
+}
+
+/* ==========================================================
+   云边端 · 应用分发与端设备
+   ========================================================== */
+function normalizeEdgeDist() {
+  DB.edge.dist.forEach((d, i) => {
+    if (!d.id) d.id = `dist-${i + 1}`;
+    if (!d.by) d.by = '张明';
+    if (!d.window) d.window = '02:00 - 05:00';
+    if (!Array.isArray(d.nodes)) d.nodes = distTargets(d.target).map(n => ({
+      name: n.name,
+      region: n.region,
+      status: d.progress >= 100 ? '已完成' : d.status === '待调度' ? '待执行' : d.progress > 0 ? '部署中' : '待执行',
+      progress: d.progress >= 100 ? 100 : d.status === '待调度' ? 0 : d.progress
+    }));
+  });
+}
+function distTargets(target) {
+  const t = String(target || '');
+  if (/云端/.test(t)) {
+    return DB.clusters.filter(c => !c.type.includes('边缘')).slice(0, 1).map(c => ({ name: c.name, region: c.region }));
+  }
+  const nodes = DB.edge.nodes;
+  if (/华东/.test(t)) return nodes.filter(n => /上海|杭州|南京|苏州/.test(n.region));
+  return nodes;
+}
+function distById(id) { return DB.edge.dist.find(d => d.id === id); }
+function newDist() {
+  if (!S.modules.edge) return toast('请先启用「云边端协同」模块', 'warn');
+  const pool = edgeWorkloadPool();
+  if (!pool.length) return toast('还没有调度位置为「边缘」的工作负载', 'warn');
+  const opts = pool.map(w => [`${w.app}||${w.comp}||${w.name}`, `${w.app} / ${w.comp} / ${w.name}`]);
+  formModal({
+    title: '新建分发任务',
+    desc: '把边缘工作负载按策略下发到目标节点；失败自动回滚上一版本。',
+    okText: '创建并开始分发',
+    wide: true,
+    body: `
+      ${fField('工作负载', fSelect('wl', opts, opts[0][0]), '仅列出调度位置为「边缘」的工作负载', true)}
+      <div class="form-row">
+        ${fField('目标版本', fInput('ver', '', 'v1.4.3'), '留空则取组件当前版本')}
+        ${fField('目标范围', fSelect('scope', [['all', '全部在线节点'], ['region', '指定区域'], ['node', '单个节点']], 'all', ' onchange="distScopeChange()"'))}
+      </div>
+      <div id="dist-target">${fField('区域关键字', fInput('kw', '上海', '上海'), '按城市匹配节点位置，例如「上海」「成都」')}</div>
+      <div class="form-row">
+        ${fField('分发策略', fSelect('strategy', ['先灰度 2 节点 → 全量', '按区域分批', '断网自治，联网后同步', '低峰期窗口执行'], '先灰度 2 节点 → 全量'))}
+        ${fField('执行窗口', fInput('window', '02:00 - 05:00', '02:00 - 05:00'))}
+      </div>`,
+    onSubmit: st => {
+      const [app, comp, name] = String(st.wl).split('||');
+      const appObj = DB.apps.find(a => a.name === app);
+      const compObj = appObj && appObj.components.find(c => c.name === comp);
+      if (!compObj) return '请选择工作负载';
+      const scope = st.scope || 'all';
+      let target = '全部门店（全部节点）';
+      let matched = DB.edge.nodes.filter(n => n.status !== '离线');
+      if (scope === 'region') {
+        const kw = String(st.kw || '').trim();
+        if (!kw) return '请填写区域关键字';
+        matched = matched.filter(n => String(n.region).includes(kw) || String(n.cluster).includes(kw));
+        if (!matched.length) return `没有匹配「${kw}」的在线节点`;
+        target = `${kw}区（${matched.length} 节点）`;
+      } else if (scope === 'node') {
+        const kw = String(st.kw || '').trim();
+        const node = DB.edge.nodes.find(n => n.name === kw);
+        if (!node) return '请填写存在的节点名，例如 edge-sh-007';
+        if (node.status === '离线') return `节点 ${kw} 离线，无法分发`;
+        matched = [node];
+        target = `单节点 ${kw}`;
+      } else {
+        target = `全部门店（${matched.length} 节点）`;
+      }
+      const rec = {
+        id: `dist-${Date.now().toString(36)}`,
+        app, comp, wl: name,
+        ver: st.ver || compObj.version || 'v1.0.0',
+        target, strategy: st.strategy, status: '进行中', progress: 0,
+        time: clockNow(), by: DB.user.name, window: st.window || '02:00 - 05:00',
+        nodes: matched.map(n => ({ name: n.name, region: n.region, status: '待执行', progress: 0 }))
+      };
+      DB.edge.dist.unshift(rec);
+      saveSnapshot();
+      route();
+      toast(`分发任务已创建，目标 ${matched.length} 个节点`, 'ok');
+      distRun(rec.id);
+    }
+  });
+}
+function distScopeChange() {
+  const mask = document.querySelector('.modal-mask:last-child');
+  if (!mask) return;
+  const d = readForm(mask);
+  const box = mask.querySelector('#dist-target');
+  if (!box) return;
+  box.innerHTML = d.scope === 'node'
+    ? fField('节点名', fInput('kw', 'edge-sh-007', 'edge-sh-007'), '只向该节点下发')
+    : fField('区域关键字', fInput('kw', d.kw || '上海', '上海'), '按城市匹配节点位置，例如「上海」「成都」');
+}
+function distRun(id) {
+  const step = () => {
+    const d = distById(id);
+    if (!d || d.progress >= 100) return;
+    d.progress = Math.min(100, d.progress + 17);
+    (d.nodes || []).forEach((n, i) => {
+      const want = Math.min(100, Math.max(0, d.progress - i * 6));
+      n.progress = want;
+      n.status = want >= 100 ? '已完成' : want > 0 ? '部署中' : '待执行';
+    });
+    if (d.progress >= 100) {
+      d.status = '已完成';
+      d.time = clockNow();
+      (d.nodes || []).forEach(n => { n.progress = 100; n.status = '已完成'; });
+    }
+    saveSnapshot();
+    if (location.hash.startsWith('#/edge/distribute')) route();
+    if (d.progress < 100) setTimeout(step, 1300);
+  };
+  setTimeout(step, 1200);
+}
+function distDetail(id) {
+  const d = distById(id);
+  if (!d) return;
+  const nodes = d.nodes || [];
+  const done = nodes.filter(n => n.status === '已完成').length;
+  openModal({
+    title: `分发详情 · ${d.wl}`,
+    desc: `${d.app} / ${d.comp} · ${d.ver} · ${d.target}`,
+    okText: '重新分发失败节点',
+    cancelText: '关闭',
+    body: `
+      <dl class="kv" style="grid-template-columns:88px 1fr">
+        <dt>状态</dt><dd>${badge(d.status)} · ${d.progress}%</dd>
+        <dt>策略</dt><dd>${esc(d.strategy)}</dd>
+        <dt>执行窗口</dt><dd class="mono">${esc(d.window || '—')}</dd>
+        <dt>发起人</dt><dd>${esc(d.by || '—')} · ${esc(d.time || '—')}</dd>
+        <dt>节点进度</dt><dd>${done} / ${nodes.length} 已完成</dd>
+      </dl>
+      <div class="sd-sec">逐节点进度</div>
+      ${nodes.length ? `<table class="table">
+        <thead><tr><th>节点</th><th>位置</th><th>状态</th><th class="right">进度</th></tr></thead>
+        <tbody>${nodes.map(n => `<tr>
+          <td class="name mono" style="font-size:11.5px">${esc(n.name)}</td>
+          <td class="tiny">${esc(n.region || '—')}</td>
+          <td>${badge(n.status === '已完成' ? '已完成' : n.status === '部署中' ? '进行中' : '待调度')}</td>
+          <td class="num">${n.progress}%</td>
+        </tr>`).join('')}</tbody>
+      </table>` : '<div class="tiny muted">该任务没有可下发的节点。</div>'}`,
+    onOk: () => {
+      const pending = (d.nodes || []).filter(n => n.status !== '已完成');
+      if (d.status === '已完成' || !pending.length) return toast('所有节点都已完成，无需重试', 'ok');
+      d.status = '进行中';
+      d.progress = 0;
+      pending.forEach(n => { n.progress = 0; n.status = '待执行'; });
+      saveSnapshot();
+      if (location.hash.startsWith('#/edge/distribute')) route();
+      toast(`已重新分发 ${pending.length} 个节点`, 'ok');
+      distRun(d.id);
+    }
+  });
+}
+function deviceDetail(id) {
+  const d = (DB.edge.devices || []).find(x => x.id === id);
+  if (!d) return;
+  const node = DB.edge.nodes.find(n => n.name === d.node);
+  openModal({
+    title: `设备详情 · ${d.id}`,
+    desc: `${d.type} · 协议 ${d.proto}`,
+    okText: '知道了',
+    cancelText: '关闭',
+    body: `
+      <dl class="kv" style="grid-template-columns:88px 1fr">
+        <dt>状态</dt><dd>${badge(d.status)}</dd>
+        <dt>所属节点</dt><dd class="mono" style="font-size:11.5px">${esc(d.node)}${node ? ` · ${esc(node.region)}` : ''}</dd>
+        <dt>协议</dt><dd>${esc(d.proto)}</dd>
+        <dt>固件版本</dt><dd class="mono" style="font-size:11.5px">${esc(d.fw)}</dd>
+        <dt>最近心跳</dt><dd>${esc(d.last)}</dd>
+        <dt>心跳周期</dt><dd class="mono">30s</dd>
+      </dl>
+      <div class="sd-sec">可用操作</div>
+      <div style="display:flex;gap:7px;flex-wrap:wrap">
+        <button class="btn sm" onclick="devicePing('${esc(d.id)}')">下发探活</button>
+        <button class="btn sm" onclick="deviceUpgrade('${esc(d.id)}')">固件升级</button>
+        <button class="btn sm" onclick="deviceUnbind('${esc(d.id)}')">解绑设备</button>
+      </div>
+      <div class="tiny muted" style="margin-top:10px;line-height:1.6">固件升级会先下发到同型号的 5% 设备，观察 24 小时无异常再全量。</div>`
+  });
+}
+function devicePing(id) {
+  const d = DB.edge.devices.find(x => x.id === id);
+  if (!d) return;
+  d.last = '刚刚';
+  saveSnapshot();
+  closeTopModal();
+  if (location.hash.startsWith('#/edge')) route();
+  toast(`${d.id} 探活成功，心跳已更新`, 'ok');
+}
+function deviceUpgrade(id) {
+  const d = DB.edge.devices.find(x => x.id === id);
+  if (!d) return;
+  const m = String(d.fw).match(/^v(\d+)\.(\d+)\.(\d+)$/);
+  d.fw = m ? `v${m[1]}.${m[2]}.${+m[3] + 1}` : 'v1.0.1';
+  saveSnapshot();
+  closeTopModal();
+  if (location.hash.startsWith('#/edge')) route();
+  toast(`${d.id} 固件已升级到 ${d.fw}`, 'ok');
+}
+function deviceUnbind(id) {
+  const d = DB.edge.devices.find(x => x.id === id);
+  if (!d) return;
+  d.node = '未绑定';
+  d.status = '离线';
+  d.last = '—';
+  saveSnapshot();
+  closeTopModal();
+  if (location.hash.startsWith('#/edge')) route();
+  toast(`${d.id} 已解绑，需重新配网后才能上线`, 'warn');
+}
+
 function viewModules() {
   setCrumb('模块管理');
   return `
@@ -4582,7 +6007,9 @@ function viewModules() {
       desc: '基于 Istio + Envoy 的东西向流量治理，提供 Sidecar 注入、mTLS、灰度路由、熔断与拓扑发现。',
       on: S.modules.mesh,
       deps: '依赖：基础内核 · 独立控制面',
-      items: [['纳管服务', '8'], ['注入率', '87.5%'], ['mTLS', '严格模式']],
+      items: [['纳管服务', String(DB.mesh.services.length)],
+        ['注入率', `${(DB.mesh.services.filter(x => x.sidecar === '已注入').length / Math.max(1, DB.mesh.services.length) * 100).toFixed(1)}%`],
+        ['mTLS', (DB.moduleCfg && DB.moduleCfg.mesh && DB.moduleCfg.mesh.mtls) || '严格模式']],
       caps: ['Sidecar 自动注入', '虚拟服务 / 目标规则', '灰度与流量镜像', 'mTLS 与证书轮换', '服务拓扑与调用链'],
       off_impact: '关闭后服务间通信回归 Kubernetes Service 原生负载均衡，应用无需改造，仅失去精细化治理能力。'
     })}
@@ -4591,7 +6018,9 @@ function viewModules() {
       desc: '边缘节点纳管、边缘应用分发与端设备接入，支持断网自治、增量同步与多架构镜像分发。',
       on: S.modules.edge,
       deps: '依赖：基础内核 · 边缘 K3s 运行时',
-      items: [['边缘节点', '8'], ['在线率', '87.5%'], ['端设备', '150']],
+      items: [['边缘节点', String(DB.edge.nodes.length)],
+        ['在线率', `${(DB.edge.nodes.filter(x => x.status === '在线').length / Math.max(1, DB.edge.nodes.length) * 100).toFixed(1)}%`],
+        ['端设备', String(DB.edge.devices.length)]],
       caps: ['边缘节点纳管', '应用/组件级分发', '按区域分批灰度', '断网自治 72h', '端设备与固件管理'],
       off_impact: '关闭后所有工作负载仅在云端调度，边缘与端侧菜单、分发任务入口自动隐藏，已有边缘工作负载保留运行。'
     })}
@@ -4658,8 +6087,8 @@ function moduleCard(m) {
     </div>
     <div style="padding:9px 16px;border-top:1px solid var(--border);display:flex;gap:7px" class="tiny">
       <button class="btn sm" onclick="location.hash='${m.key === 'mesh' ? '/mesh' : '/edge/nodes'}'" ${m.on ? '' : 'disabled'}>进入模块</button>
-      <button class="btn sm ghost" onclick="toast('模块配置（原型）')">配置</button>
-      <button class="btn sm ghost" onclick="toast('查看模块文档（原型）')">文档</button>
+      <button class="btn sm ghost" onclick="moduleConfig('${m.key}')">配置</button>
+      <button class="btn sm ghost" onclick="moduleDocs('${m.key}')">文档</button>
     </div>
   </div>`;
 }
@@ -4670,7 +6099,7 @@ function viewEnvs() {
   return `
   <div class="page-head">
     <div><div class="ttl">环境管理</div><div class="sub">环境绑定集群与配额，定义应用在环境间的提升策略。</div></div>
-    <div class="acts"><button class="btn primary" onclick="toast('新建环境（原型）')">${icon('plus', '', 14)}新建环境</button></div>
+    <div class="acts"><button class="btn primary" onclick="newEnv()">${icon('plus', '', 14)}新建环境</button></div>
   </div>
   <div class="grid g3">
     ${DB.envs.map(e => `
@@ -4697,7 +6126,7 @@ function viewRbac() {
   return `
   <div class="page-head">
     <div><div class="ttl">角色权限</div><div class="sub">RBAC 按环境与应用维度收敛权限，模块开关仅平台管理员可操作。</div></div>
-    <div class="acts"><button class="btn primary" onclick="toast('新建角色（原型）')">${icon('plus', '', 14)}新建角色</button></div>
+    <div class="acts"><button class="btn primary" onclick="newRole()">${icon('plus', '', 14)}新建角色</button></div>
   </div>
   <div class="card">
     <table class="table">
@@ -4805,7 +6234,11 @@ function viewDesign() {
           ['跨端调度视图', '工作负载页按「边缘 / 端侧」筛选', '/workloads'],
           ['工作负载运行时', '工作负载 → 详情，看指标曲线、实时日志、YAML 与终端', '/workloads/retail-platform/order-service/order-service-api'],
           ['服务拓扑', 'Service Mesh → 服务拓扑，查看调用关系与异常链路', '/mesh/topology'],
-          ['链路追踪', 'Service Mesh → 链路追踪，点开慢链路看瀑布图与耗时分布', '/mesh/tracing']
+          ['链路追踪', 'Service Mesh → 链路追踪，点开慢链路看瀑布图与耗时分布', '/mesh/tracing'],
+          ['流量规则编排', 'Service Mesh → 流量规则，新建/编辑灰度、重试、熔断与镜像规则', '/mesh/traffic'],
+          ['边缘节点纳管', '云边端协同 → 边缘节点，登记节点、看容量曲线与逐节点工作负载', '/edge/nodes'],
+          ['应用分发', '云边端协同 → 应用分发，新建分发任务并逐节点查看进度', '/edge/distribute'],
+          ['集群接入', '运维中心 → 集群管理 → 接入集群，校验后接管调度', '/ops/clusters']
         ].map(([t, d, r]) => `
           <div style="display:flex;gap:9px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;cursor:pointer" onclick="location.hash='${r}'">
             <span style="color:var(--primary);margin-top:1px">${icon('chev', '', 13)}</span>
@@ -5429,9 +6862,13 @@ function route() {
   else if (seg[0] === 'mesh' && seg[1] === 'topology') html = viewMeshTopology();
   else if (seg[0] === 'mesh' && seg[1] === 'tracing') html = viewMeshTracing();
   else if (seg[0] === 'mesh') html = viewMesh();
+  else if (seg[0] === 'edge' && seg[1] === 'nodes' && seg[2]) html = viewEdgeNode(decodeURIComponent(seg[2]));
+  else if (seg[0] === 'edge' && seg[1] === 'nodes') html = viewEdgeNodes();
   else if (seg[0] === 'edge' && seg[1] === 'distribute') html = viewEdgeDistribute();
   else if (seg[0] === 'edge' && seg[1] === 'devices') html = viewEdgeDevices();
   else if (seg[0] === 'edge') html = viewEdgeNodes();
+  else if (seg[0] === 'ops' && seg[1] === 'clusters' && seg[2]) html = viewCluster(decodeURIComponent(seg[2]));
+  else if (seg[0] === 'ops' && seg[1] === 'clusters') html = viewClusters();
   else if (seg[0] === 'ops' && seg[1] === 'alerts') html = viewAlerts();
   else if (seg[0] === 'ops') html = viewClusters();
   else if (seg[0] === 'admin' && seg[1] === 'modules') html = viewModules();
@@ -5442,6 +6879,7 @@ function route() {
 
   $('#view').innerHTML = html;
   renderSidebar();
+  document.querySelectorAll('#view .chart').forEach(bindChart);
   if (LOG_TIMER) { clearInterval(LOG_TIMER); LOG_TIMER = null; }
   if (seg[0] === 'workloads' && seg[1]) mountWorkload();
   window.scrollTo({ top: 0 });
@@ -5449,6 +6887,9 @@ function route() {
 
 /* ---------------- 启动 ---------------- */
 normalizeModel();
+normalizeEdge();
+normalizeClusters();
+normalizeEdgeDist();
 window.addEventListener('hashchange', route);
 renderTopbar();
 renderSidebar();

@@ -497,12 +497,46 @@ window.DB = {
       { name: 'mqtt-broker', ns: 'iot-prod', ver: 'v5.6.1', sidecar: '已注入', rps: '8.40k', success: '99.99%', p99: '6ms', inst: 3, status: '健康' },
       { name: 'order-db', ns: 'retail-prod', ver: '8.0.34', sidecar: '未注入', rps: '—', success: '—', p99: '—', inst: 1, status: '跳过' }
     ],
+    /* 流量规则：match / act 为结构化字段，展示文案由 app.js 生成，便于编辑回填 */
     rules: [
-      { name: 'order-service-canary', type: '虚拟服务', host: 'order-service', match: 'header[x-version]=v2', action: '路由 → v2.4.1 (权重 10%)', status: '生效中' },
-      { name: 'order-service-retry', type: '目标规则', host: 'order-service', match: '所有请求', action: '重试 3 次 / 超时 800ms', status: '生效中' },
-      { name: 'pay-router-circuit', type: '目标规则', host: 'pay-router', match: '所有请求', action: '熔断：连续 5 次 5xx → 隔离 30s', status: '生效中' },
-      { name: 'channel-adapter-outlier', type: '目标规则', host: 'channel-adapter', match: '所有请求', action: '异常点驱逐 / 最大 50%', status: '生效中' },
-      { name: 'inventory-mirror', type: '虚拟服务', host: 'inventory-service', match: '10% 采样', action: '流量镜像 → inventory-shadow', status: '已停用' }
+      {
+        id: 'rule-order-canary', name: 'order-service-canary', type: '虚拟服务',
+        host: 'order-service', ns: 'retail-prod',
+        match: { kind: 'header', key: 'x-version', value: 'v2' },
+        act: { kind: 'split', splits: [
+          { ver: 'v2.4.1', weight: 90, cur: true },
+          { ver: 'v2.5.0', weight: 10 }
+        ] },
+        status: '生效中', hits: '1.24k/s', updated: '10 分钟前', by: '张明'
+      },
+      {
+        id: 'rule-order-retry', name: 'order-service-retry', type: '目标规则',
+        host: 'order-service', ns: 'retail-prod',
+        match: { kind: 'all' },
+        act: { kind: 'retry', times: 3, timeout: 800, backoff: 25 },
+        status: '生效中', hits: '3.10k/s', updated: '2 天前', by: '李静'
+      },
+      {
+        id: 'rule-pay-circuit', name: 'pay-router-circuit', type: '目标规则',
+        host: 'pay-router', ns: 'pay-prod',
+        match: { kind: 'all' },
+        act: { kind: 'circuit', fails: 5, isolate: 30, judge: '5xx' },
+        status: '生效中', hits: '860/s', updated: '5 天前', by: '张明'
+      },
+      {
+        id: 'rule-channel-outlier', name: 'channel-adapter-outlier', type: '目标规则',
+        host: 'channel-adapter', ns: 'pay-prod',
+        match: { kind: 'all' },
+        act: { kind: 'outlier', pct: 50, base: 30, interval: 10 },
+        status: '生效中', hits: '420/s', updated: '5 天前', by: '王涛'
+      },
+      {
+        id: 'rule-inventory-mirror', name: 'inventory-mirror', type: '虚拟服务',
+        host: 'inventory-service', ns: 'retail-prod',
+        match: { kind: 'percent', value: '10' },
+        act: { kind: 'mirror', target: 'inventory-shadow', pct: 10 },
+        status: '已停用', hits: '0/s', updated: '12 天前', by: '李静'
+      }
     ],
 
     /* 链路追踪：Sidecar 上报的 OTel Span。
