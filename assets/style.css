@@ -901,3 +901,8 @@ button { font-family: inherit; }
 .card.logcard { display: flex; flex-direction: column; }
 .card.logcard .card-body { flex: 1; display: flex; flex-direction: column; }
 .card.logcard .logbox { flex: 1; max-height: none; min-height: 240px; }
+
+/* 组件卡片上的上下游依赖 */
+.dep-chips { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
+.dep-chips .chip { font-size: 10px; padding: 1px 6px; background: #f4f6fb; color: var(--text-2); }
+.dep-chips .chip.svc { background: var(--primary-soft); color: var(--primary); font-family: var(--mono); font-weight: 600; }

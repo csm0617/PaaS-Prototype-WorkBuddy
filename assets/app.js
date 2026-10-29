@@ -68,6 +68,34 @@ function resetSnapshot() {
 }
 loadSnapshot();
 
+/* ---------------- 模型归一化 ----------------
+   replicas / readyN 是结构化字段，ready 字符串只作展示；
+   历史快照与应用市场数据没有这些字段时在此补齐。 */
+function normalizeModel() {
+  DB.apps.forEach(a => {
+    a.components.forEach(c => {
+      if (!c.serviceName) c.serviceName = c.name;
+      if (!c.port) c.port = 8080;
+      if (!c.healthPath) c.healthPath = '/healthz';
+      if (!c.readyPath) c.readyPath = '/readyz';
+      c.workloads.forEach(w => {
+        const m = String(w.ready || '').match(/(\d+)\s*\/\s*(\d+)/);
+        if (typeof w.replicas !== 'number') w.replicas = m ? +m[2] : (w.kind === 'CronJob' ? 0 : 1);
+        if (typeof w.readyN !== 'number') w.readyN = m ? Math.min(+m[1], w.replicas) : w.replicas;
+        w.ready = w.kind === 'CronJob' ? '—' : `${w.readyN}/${w.replicas}`;
+      });
+    });
+  });
+}
+normalizeModel();
+function wReady(w) { return w.kind === 'CronJob' ? '—' : `${w.readyN}/${w.replicas}`; }
+function setReplicas(w, n) {
+  w.replicas = n;
+  w.readyN = n;
+  w.ready = wReady(w);
+  w.status = n === 0 ? '已停止' : '运行中';
+}
+
 /* ---------------- 工具 ---------------- */
 const $ = (s, r = document) => r.querySelector(s);
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
@@ -907,6 +935,14 @@ function appTabBody(app) {
           <div>
             <div class="t">${esc(comp.name)} <span class="chip" style="margin-left:4px">${esc(comp.role)}</span></div>
             <div class="d mono" style="margin-top:2px">${esc(comp.image)}:${esc(comp.version)} · ${runtimeText(comp)}</div>
+            <div class="dep-chips">
+              <span class="chip svc" title="集群内服务名与端口">${esc(comp.serviceName || comp.name)}:${comp.port}</span>
+              ${(() => {
+                const d = compDeps(app.id, comp.name);
+                return d.up.map(x => `<span class="chip" title="上游调用方 · ${esc(x.l || '')}">← ${esc(x.n)}</span>`).join('')
+                  + d.down.map(x => `<span class="chip" title="下游依赖 · ${esc(x.l || '')}">→ ${esc(x.n)}</span>`).join('');
+              })()}
+            </div>
           </div>
           <div class="r">
             <button class="btn sm ghost" onclick="newWorkload('${app.id}','${comp.name}')">${icon('plus', '', 12)}工作负载</button>
@@ -925,7 +961,7 @@ function appTabBody(app) {
               <tr class="clickable" onclick="selectWl('${w.name}')">
                 <td class="name">${esc(w.name)}<div class="sub mono">${esc(w.image)}</div></td>
                 <td><span class="chip">${esc(w.kind)}</span></td>
-                <td class="num">${esc(w.ready)}</td>
+                <td class="num">${wReady(w)}</td>
                 <td>${badge(w.status)}</td>
                 <td>${whereChip(w.where)}</td>
                 <td class="mono" style="font-size:11px">${esc(w.cpu)}<div class="sub">${esc(w.mem)}</div></td>
@@ -956,7 +992,7 @@ function appTabBody(app) {
           <div class="grid g2" style="gap:16px">
             <dl class="kv">
               <dt>镜像</dt><dd class="mono">${esc(wl.image)}</dd>
-              <dt>副本</dt><dd>${esc(wl.ready)} 就绪</dd>
+              <dt>副本</dt><dd>${wReady(wl)} 就绪</dd>
               <dt>调度位置</dt><dd>${whereChip(wl.where)} <span class="mono muted" style="font-size:11px">${esc(wl.cluster)}</span></dd>
               <dt>资源</dt><dd class="mono">${esc(wl.cpu)} · ${esc(wl.mem)}</dd>
             </dl>
@@ -1360,7 +1396,7 @@ function openAccess(appId, url) {
       ${step(3, '路由匹配', `${e.type}规则 → ${e.backend}（${e.auth}）`, '#7c3aed')}
       ${step(4, '转发到后端', comp ? `组件 ${comp.name} · ${comp.workloads.length} 个工作负载` : e.backend, '#2563eb')}
       ${wls.length ? `<div style="padding:2px 0 4px 31px;display:flex;gap:5px;flex-wrap:wrap">
-        ${wls.map(w => `<span class="chip" style="font-size:10.5px">${esc(w.name)} · ${w.ready}</span>`).join('')}
+        ${wls.map(w => `<span class="chip" style="font-size:10.5px">${esc(w.name)} · ${wReady(w)}</span>`).join('')}
       </div>` : ''}
     </div>
     <div class="tiny muted" style="margin-top:10px;padding-top:9px;border-top:1px solid var(--border);line-height:1.7">
@@ -1400,8 +1436,9 @@ function compRows() {
   DB.apps.forEach(a => a.components.forEach(c => {
     let ready = 0, want = 0;
     c.workloads.forEach(w => {
-      const m = String(w.ready).match(/(\d+)\s*\/\s*(\d+)/);
-      if (m) { ready += +m[1]; want += +m[2]; }
+      if (w.kind === 'CronJob') return;
+      ready += w.readyN || 0;
+      want += w.replicas || 0;
     });
     const bad = c.workloads.filter(w => w.status !== '运行中' && w.status !== '已完成').length;
     rows.push({
@@ -1516,6 +1553,14 @@ function openComponentsOf(appId) {
   S.compFilter = 'all';
   S.compQ = '';
   goto('#/components');
+}
+/* 组件上下游：来自 DB.deps[appId] 的 [上游, 下游, 说明, async?] */
+function compDeps(appId, name) {
+  const list = (DB.deps && DB.deps[appId]) || [];
+  return {
+    up: list.filter(e => e[1] === name).map(e => ({ n: e[0], l: e[2] })),
+    down: list.filter(e => e[0] === name).map(e => ({ n: e[1], l: e[2] }))
+  };
 }
 function newComponentGlobal() {
   if (!DB.apps.length) return toast('请先创建应用，组件必须归属于应用', 'warn');
@@ -1652,7 +1697,7 @@ function viewWorkloads() {
           <td class="name">${esc(w.name)}<div class="sub mono">${esc(w.image)}</div></td>
           <td>${esc(w.app)}<div class="sub">${esc(w.comp)}</div></td>
           <td><span class="chip">${esc(w.kind)}</span></td>
-          <td class="num">${esc(w.ready)}</td>
+          <td class="num">${wReady(w)}</td>
           <td>${badge(w.status)}</td>
           <td>${whereChip(w.where)}</td>
           <td class="mono" style="font-size:11px">${esc(w.cluster)}</td>
@@ -1725,8 +1770,8 @@ function wlFlavor(w) {
 
 /* ---------- 实例（Pod） ---------- */
 function podsFor(w) {
-  const m = String(w.ready).match(/(\d+)\s*\/\s*(\d+)/);
-  const total = m ? +m[2] : 0, readyN = m ? +m[1] : 0;
+  const total = w.kind === 'CronJob' ? 0 : (w.replicas || 0);
+  const readyN = Math.min(w.readyN == null ? total : w.readyN, total);
   if (!total) return [];
   const r = mulberry32(wHash(w.name));
   const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -1887,7 +1932,7 @@ function eventsFor(w, comp) {
     { type: 'Normal', reason: 'Started', msg: 'Started container ' + w.name, count: 1, age: w.age }
   ];
   if ((w.restarts || 0) > 0) {
-    ev.push({ type: 'Warning', reason: 'Unhealthy', msg: `Liveness probe failed: Get "http://10.24.7.19:8080/healthz": context deadline exceeded`, count: w.restarts, age: '32m' });
+    ev.push({ type: 'Warning', reason: 'Unhealthy', msg: `Liveness probe failed: Get "http://10.24.7.19:${comp ? comp.port : 8080}${comp ? comp.healthPath : '/healthz'}": context deadline exceeded`, count: w.restarts, age: '32m' });
     ev.push({ type: 'Warning', reason: 'BackOff', msg: 'Back-off restarting failed container', count: w.restarts, age: '31m' });
   }
   if (w.status !== '运行中' && w.status !== '已完成') {
@@ -1904,7 +1949,7 @@ function yamlFor(app, comp, w) {
   if (w.kind === 'CronJob') return cronYaml(app, comp, w);
   const { cur: cpuCur, cap: cpuCap } = parseRes(w.cpu, 'cpu');
   const { cur: memCur, cap: memCap } = parseRes(w.mem, 'mem');
-  const np = (String(w.ready).match(/\/(\d+)/) || [, 1])[1] | 0;
+  const np = w.replicas || 0;
   const reqCpu = Math.max(0.1, cpuCap / 4), reqMem = Math.max(0.25, memCap / 2);
   const inject = w.mesh === '已注入' && S.modules.mesh;
   const base = [
@@ -1944,7 +1989,7 @@ function yamlFor(app, comp, w) {
     `          image: ${imgRef(comp, w)}`,
     '          imagePullPolicy: IfNotPresent',
     '          ports:',
-    '            - containerPort: 8080',
+    `            - containerPort: ${comp.port}`,
     '              name: http',
     '          resources:',
     '            requests:',
@@ -1960,14 +2005,14 @@ function yamlFor(app, comp, w) {
     '              value: http://otel-collector.observability:4317',
     '          livenessProbe:',
     '            httpGet:',
-    '              path: /healthz',
-    '              port: 8080',
+    `              path: ${comp.healthPath}`,
+    `              port: ${comp.port}`,
     '            initialDelaySeconds: 15',
     '            periodSeconds: 10',
     '          readinessProbe:',
     '            httpGet:',
-    '              path: /readyz',
-    '              port: 8080',
+    `              path: ${comp.readyPath}`,
+    `              port: ${comp.port}`,
     '            periodSeconds: 5'
   ];
   const kind = String(base[1] || '').replace('kind: ', '');
@@ -2190,7 +2235,7 @@ function viewWorkloadDetail(appId, compName, wlName) {
   </div>
 
   <div class="grid g4" style="margin-bottom:14px">
-    <div class="stat"><div class="lab">实例</div><div class="val">${esc(wl.ready)}</div>
+    <div class="stat"><div class="lab">实例</div><div class="val">${wReady(wl)}</div>
       <div class="foot">${pods.filter(p => p.phase === 'Running').length} 个 Running · ${pods.length} 个实例</div></div>
     <div class="stat"><div class="lab">重启次数</div><div class="val" style="${wl.restarts ? 'color:var(--warning)' : ''}">${wl.restarts}</div>
       <div class="foot">运行时长 ${esc(wl.age)}</div></div>
@@ -2265,7 +2310,9 @@ function wlOverviewView(app, comp, wl, pods) {
         <td class="right mono" style="font-size:11px">${esc(p.age)}</td>
       </tr>`).join('')}</tbody>
     </table></div>` : `<div class="empty" style="padding:26px 16px">
-      <p style="margin:0">该工作负载按计划触发，不保留常驻实例；每次运行会创建一个临时 Pod。</p>
+      <p style="margin:0">${wl.kind === 'CronJob'
+        ? '该工作负载按计划触发，不保留常驻实例；每次运行会创建一个临时 Job 与 Pod。'
+        : `当前副本数为 0（${esc(wl.status)}），没有运行中的实例。把副本数调大即会自动拉起。`}</p>
     </div>`}
   </div>
 
@@ -2275,7 +2322,7 @@ function wlOverviewView(app, comp, wl, pods) {
       <dl class="kv" style="grid-template-columns:70px 1fr">
         <dt>名称</dt><dd class="mono" style="font-size:11px">${esc(wl.name)}</dd>
         <dt>镜像</dt><dd class="mono" style="font-size:11px;word-break:break-all">${esc(imgRef(comp, wl))}</dd>
-        <dt>端口</dt><dd class="mono" style="font-size:11px">8080/TCP · http</dd>
+        <dt>端口</dt><dd class="mono" style="font-size:11px">${comp.port}/TCP · http</dd>
         <dt>拉取策略</dt><dd>IfNotPresent</dd>
         ${inject ? `<dt>Sidecar</dt><dd>istio-proxy 1.29 · mTLS strict</dd>` : ''}
       </dl>
@@ -2283,8 +2330,8 @@ function wlOverviewView(app, comp, wl, pods) {
     <div style="padding:14px 16px;border-right:1px solid var(--border)">
       <div class="tiny muted" style="margin-bottom:9px">探针与策略</div>
       <dl class="kv" style="grid-template-columns:70px 1fr">
-        <dt>存活探针</dt><dd class="mono" style="font-size:11px">GET /healthz :8080 · 10s</dd>
-        <dt>就绪探针</dt><dd class="mono" style="font-size:11px">GET /readyz :8080 · 5s</dd>
+        <dt>存活探针</dt><dd class="mono" style="font-size:11px">GET ${esc(comp.healthPath)} :${comp.port} · 10s</dd>
+        <dt>就绪探针</dt><dd class="mono" style="font-size:11px">GET ${esc(comp.readyPath)} :${comp.port} · 5s</dd>
         <dt>更新策略</dt><dd>RollingUpdate · 25% / 0</dd>
         <dt>调度位置</dt><dd>${whereChip(wl.where)} <span class="mono muted" style="font-size:10.5px">${esc(wl.cluster)}</span></dd>
       </dl>
@@ -2621,7 +2668,7 @@ function releaseApp(appId, compName) {
       </div>
       ${fField('变更说明', `<textarea class="input" data-k="note" rows="2" placeholder="例如：支持门店自提订单拆分"></textarea>`)}
       <div class="warn-box" style="margin-top:12px">
-        本次将影响 <b>${c0 ? c0.workloads.length : 0}</b> 个工作负载、<b>${c0 ? c0.workloads.filter(w => /^\d/.test(w.ready)).reduce((s, w) => s + +(String(w.ready).split('/')[1] || 0), 0) : 0}</b> 个实例。
+        本次将影响 <b>${c0 ? c0.workloads.length : 0}</b> 个工作负载、<b>${c0 ? c0.workloads.reduce((s, w) => s + (w.kind === 'CronJob' ? 0 : (w.replicas || 0)), 0) : 0}</b> 个实例。
       </div>`,
     onSubmit: st => {
       if (!st.version) return '请填写发布版本';
@@ -4326,6 +4373,8 @@ function buildWorkload(src, comp) {
   return {
     name: src.wlName,
     kind,
+    replicas: kind === 'CronJob' ? 0 : reps,
+    readyN: kind === 'CronJob' ? 0 : reps,
     ready: kind === 'CronJob' ? '—' : `${reps}/${reps}`,
     image: src.wlImage || comp.version || 'v1.0.0',
     cpu: src.wlCpu || '1 / 2c',
@@ -4574,7 +4623,7 @@ function newWorkload(appId, compName) {
       }, comp);
       comp.workloads.push(wl);
       app.updated = nowStamp();
-      app.events.unshift({ t: clockNow(), k: 'ok', tx: `工作负载 <b>${esc(wl.name)}</b> 已创建（${esc(wl.kind)} · ${esc(wl.ready)}）` });
+      app.events.unshift({ t: clockNow(), k: 'ok', tx: `工作负载 <b>${esc(wl.name)}</b> 已创建（${esc(wl.kind)} · ${wReady(wl)}）` });
       saveSnapshot();
       S.appComp = comp.name;
       S.appWl = wl.name;
@@ -4708,7 +4757,7 @@ function scaleApp(app) {
     okText: '应用变更',
     wide: true,
     body: rows.map(({ comp, wl }, i) => {
-      const cur = parseInt(String(wl.ready).split('/')[0], 10);
+      const cur = wl.replicas || 0;
       return `<div class="scale-row">
         <div class="nm"><b>${esc(wl.name)}</b><span>${esc(comp)} · ${esc(wl.kind)} · ${esc(wl.where)}</span></div>
         <span class="cur">当前 ${Number.isFinite(cur) ? cur : 0}</span>
@@ -4718,11 +4767,10 @@ function scaleApp(app) {
     onSubmit: st => {
       const changes = [];
       rows.forEach(({ wl }, i) => {
-        const before = parseInt(String(wl.ready).split('/')[0], 10) || 0;
+        const before = wl.replicas || 0;
         const n = clampInt(st['r' + i], 0, 50, before);
         if (n === before) return;
-        wl.ready = `${n}/${n}`;
-        wl.status = n === 0 ? '已停止' : '运行中';
+        setReplicas(wl, n);
         changes.push(`${wl.name} ${before} → ${n}`);
       });
       if (!changes.length) return '副本数没有变化';
