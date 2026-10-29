@@ -862,3 +862,42 @@ button { font-family: inherit; }
 .term-in { display: flex; align-items: center; gap: 8px; padding: 6px 14px 14px; font-family: var(--mono); font-size: 11.5px; color: #7dd3fc; }
 .term-in input { flex: 1; background: transparent; border: none; outline: none; color: #e2e8f0; font-family: var(--mono); font-size: 11.5px; }
 .term-in input::placeholder { color: #475569; }
+
+/* ==========================================================
+   发布闭环 · 审批横幅 / 阶段筛选 / 发布摘要
+   ========================================================== */
+.approve-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 13px 16px; margin-bottom: 14px;
+  border: 1px solid #f2ddb6; border-radius: 10px;
+  background: linear-gradient(100deg, #fffaf0 0%, #fffdf9 60%, #fff 100%);
+}
+.approve-banner .ic {
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  display: grid; place-items: center;
+  background: #fff4e0; color: var(--warning);
+}
+.approve-banner .tx { flex: 1; min-width: 0; }
+.approve-banner .tx b { font-size: 12.8px; font-weight: 640; }
+.approve-banner .tx p { margin: 2px 0 0; font-size: 11.5px; color: var(--text-2); }
+.approve-banner.ok { border-color: #cfe9db; background: linear-gradient(100deg, #f2fbf6 0%, #fbfefd 60%, #fff 100%); }
+.approve-banner.ok .ic { background: var(--success-soft); color: var(--success); }
+
+.log-filter { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 14px 0; }
+.log-filter .filter-pill { font-size: 11px; padding: 3px 9px; }
+
+.stage { cursor: pointer; }
+.stage.skip .box { border-style: dashed; opacity: .55; }
+.stage.sel .box { border-color: var(--primary-line); box-shadow: 0 0 0 3px rgba(37, 99, 235, .1); }
+
+.rel-sum {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface-2);
+}
+@media (max-width: 720px) { .rel-sum { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* 流水线日志卡随右栏等高 */
+.card.logcard { display: flex; flex-direction: column; }
+.card.logcard .card-body { flex: 1; display: flex; flex-direction: column; }
+.card.logcard .logbox { flex: 1; max-height: none; min-height: 240px; }
