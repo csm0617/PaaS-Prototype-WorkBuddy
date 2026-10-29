@@ -6,6 +6,7 @@
 const DB = window.DB;
 const LS_KEY = 'paas.prototype.modules.v1';
 const LS_ENV = 'paas.prototype.env.v1';
+const LS_DB = 'paas.prototype.db.v1';
 
 const S = {
   modules: Object.assign({ mesh: true, edge: true }, JSON.parse(localStorage.getItem(LS_KEY) || '{}')),
@@ -17,10 +18,66 @@ const S = {
   pipelineTab: 'overview'
 };
 
+/* ---------------- 演示数据快照 ----------------
+   原型里的新建/删除/扩缩容会写入 localStorage，刷新后依然保留；
+   需要回到初始演示数据时，可在「设计说明」页重置。 */
+function loadSnapshot() {
+  try {
+    const raw = localStorage.getItem(LS_DB);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    if (d && d.v === 1) {
+      if (Array.isArray(d.apps)) DB.apps = d.apps;
+      if (d.access && typeof d.access === 'object') DB.access = d.access;
+    }
+  } catch (e) { /* 快照损坏时退回 data.js 初始数据 */ }
+}
+function saveSnapshot() {
+  try {
+    localStorage.setItem(LS_DB, JSON.stringify({ v: 1, apps: DB.apps, access: DB.access }));
+  } catch (e) { /* 存储不可用时降级为纯内存态 */ }
+}
+function resetSnapshot() {
+  try { localStorage.removeItem(LS_DB); } catch (e) { /* 忽略 */ }
+  location.reload();
+}
+loadSnapshot();
+
 /* ---------------- 工具 ---------------- */
 const $ = (s, r = document) => r.querySelector(s);
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function num(n) { return Number(n).toLocaleString('en-US'); }
+
+/* 时间戳：2026-10-29 20:41 / 20:41 */
+function pad2(n) { return String(n).padStart(2, '0'); }
+function nowStamp() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function clockNow() { const d = new Date(); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+
+/* 路由跳转：目标与当前一致时手动重绘（hashchange 不会触发） */
+function goto(hash) {
+  if (location.hash === hash) route(); else location.hash = hash;
+}
+
+/* 名称工具 */
+const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+function slugify(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+function nextAppId(name) {
+  const slug = slugify(name);
+  if (!slug) {
+    let i = DB.apps.length + 1;
+    while (DB.apps.some(a => a.id === `app-${i}`)) i++;
+    return `app-${i}`;
+  }
+  let id = slug, i = 2;
+  while (DB.apps.some(a => a.id === id)) id = `${slug}-${i++}`;
+  return id;
+}
+
 
 const STK = {
   '运行中': 'ok', '健康': 'ok', '在线': 'ok', '成功': 'ok', '完成': 'ok', '已完成': 'ok',
@@ -212,6 +269,163 @@ function openModal(o) {
   mask.querySelector('[data-act=ok]').onclick = () => { close(); o.onOk && o.onOk(); };
 }
 
+/* ---------------- 表单 / 向导 ---------------- */
+/* 收集所有带 data-k 的控件为对象 */
+function readForm(root) {
+  const out = {};
+  root.querySelectorAll('[data-k]').forEach(el => {
+    out[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value.trim();
+  });
+  return out;
+}
+
+/* 可选区块联动：勾选后才允许填写 */
+function bindToggle(root) {
+  root.querySelectorAll('[data-toggle]').forEach(cb => {
+    const box = root.querySelector('#' + cb.dataset.toggle);
+    if (!box) return;
+    const sync = () => {
+      box.style.opacity = cb.checked ? '1' : '.45';
+      box.style.pointerEvents = cb.checked ? '' : 'none';
+      box.querySelectorAll('input, select').forEach(el => { el.disabled = !cb.checked; });
+    };
+    cb.addEventListener('change', sync);
+    sync();
+  });
+}
+
+/* 单步表单弹窗：onSubmit 返回字符串则作为错误提示留在弹窗内 */
+function formModal(o) {
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = `<div class="modal ${o.wide ? 'wide' : ''}">
+    <div class="mh"><h3>${o.title}</h3>${o.desc ? `<p>${o.desc}</p>` : ''}</div>
+    <div class="mb">${o.body || ''}<div class="form-err" hidden style="display:none"></div></div>
+    <div class="mf">
+      <button class="btn" data-act="cancel"${o.hideCancel ? ' style="display:none"' : ''}>${o.cancelText || '取消'}</button>
+      <button class="btn ${o.danger ? 'danger' : o.plain ? '' : 'primary'}" data-act="ok">${o.okText || '确定'}</button>
+    </div>
+  </div>`;
+  document.body.appendChild(mask);
+
+  const err = mask.querySelector('.form-err');
+  const close = () => mask.remove();
+  const showErr = m => { err.textContent = m; err.hidden = false; err.style.display = 'block'; };
+  const clearErr = () => { err.hidden = true; err.style.display = 'none'; };
+
+  mask.addEventListener('click', e => { if (e.target === mask) close(); });
+  mask.querySelector('[data-act=cancel]').onclick = close;
+  mask.querySelector('[data-act=ok]').onclick = () => {
+    const msg = o.onSubmit ? o.onSubmit(readForm(mask)) : null;
+    if (msg) return showErr(msg);
+    close();
+  };
+  mask.querySelectorAll('[data-k]').forEach(el => {
+    el.addEventListener('input', clearErr);
+    el.addEventListener('change', clearErr);
+  });
+  bindToggle(mask);
+  const first = mask.querySelector('input:not([type=checkbox]), select, textarea');
+  if (first) setTimeout(() => first.focus(), 40);
+  return mask;
+}
+
+/* 多步向导：steps = [{ name, render(state), validate(state) }] */
+function wizard(o) {
+  const state = Object.assign({}, o.state || {});
+  const steps = o.steps;
+  let idx = 0;
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = `<div class="modal wide">
+    <div class="wiz-head"><h3>${o.title}</h3>${o.desc ? `<p>${o.desc}</p>` : ''}</div>
+    <div class="wiz-steps"></div>
+    <div class="mb"></div>
+    <div class="mf">
+      <button class="btn" data-act="cancel">取消</button>
+      <button class="btn" data-act="prev">上一步</button>
+      <button class="btn primary" data-act="next">下一步</button>
+    </div>
+  </div>`;
+  document.body.appendChild(mask);
+
+  const stepsBar = mask.querySelector('.wiz-steps');
+  const body = mask.querySelector('.mb');
+  const prevBtn = mask.querySelector('[data-act=prev]');
+  const nextBtn = mask.querySelector('[data-act=next]');
+  const err = document.createElement('div');
+  err.className = 'form-err';
+  err.hidden = true;
+  err.style.display = 'none';
+
+  const showErr = m => { err.textContent = m; err.hidden = false; err.style.display = 'block'; };
+  const clearErr = () => { err.hidden = true; err.style.display = 'none'; };
+
+  function paint() {
+    stepsBar.innerHTML = steps.map((s, i) => `
+      <div class="wiz-step ${i === idx ? 'on' : ''} ${i < idx ? 'done' : ''}">
+        <span class="n">${i < idx ? '✓' : i + 1}</span><span>${s.name}</span>
+      </div>${i < steps.length - 1 ? '<span class="wiz-ln"></span>' : ''}`).join('');
+    prevBtn.style.display = idx === 0 ? 'none' : '';
+    nextBtn.textContent = idx === steps.length - 1 ? (o.okText || '创建') : '下一步';
+
+    body.innerHTML = steps[idx].render(state);
+    body.appendChild(err);
+    clearErr();
+    bindToggle(body);
+    body.querySelectorAll('[data-k]').forEach(el => {
+      const k = el.dataset.k;
+      if (el.type === 'checkbox') el.checked = !!state[k];
+      else if (state[k] !== undefined && state[k] !== null) el.value = state[k];
+      const sync = () => { state[k] = el.type === 'checkbox' ? el.checked : el.value; clearErr(); };
+      el.addEventListener('input', sync);
+      el.addEventListener('change', sync);
+    });
+    if (o.afterPaint) o.afterPaint(body, state);
+    const first = body.querySelector('input:not([type=checkbox]), select, textarea');
+    if (first) setTimeout(() => first.focus(), 40);
+  }
+
+  const close = () => mask.remove();
+  mask.addEventListener('click', e => { if (e.target === mask) close(); });
+  mask.querySelector('[data-act=cancel]').onclick = close;
+  prevBtn.onclick = () => { if (idx > 0) { idx--; paint(); } };
+  nextBtn.onclick = () => {
+    const step = steps[idx];
+    const msg = step.validate ? step.validate(state) : null;
+    if (msg) return showErr(msg);
+    if (idx < steps.length - 1) { idx++; paint(); return; }
+    const out = o.onSubmit ? o.onSubmit(state) : null;
+    if (out) return showErr(out);
+    close();
+  };
+
+  paint();
+  return mask;
+}
+
+/* 表单片段 */
+function fField(label, control, hint = '', req = false) {
+  return `<div class="field"><label>${label}${req ? '<span class="req">*</span>' : ''}</label>${control}${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
+}
+function fInput(k, value = '', ph = '', type = 'text') {
+  return `<input class="input" data-k="${k}" type="${type}" value="${esc(value)}" placeholder="${esc(ph)}" />`;
+}
+function fSelect(k, opts, value) {
+  return `<select class="input" data-k="${k}">${opts.map(o => {
+    const v = Array.isArray(o) ? o[0] : o, n = Array.isArray(o) ? o[1] : o;
+    return `<option value="${esc(v)}"${String(v) === String(value) ? ' selected' : ''}>${esc(n)}</option>`;
+  }).join('')}</select>`;
+}
+function fCheck(k, title, checked, hint = '', toggleId = '') {
+  return `<label class="check">
+    <input type="checkbox" data-k="${k}"${checked ? ' checked' : ''}${toggleId ? ` data-toggle="${toggleId}"` : ''} />
+    <span><b>${title}</b>${hint ? `<em>${hint}</em>` : ''}</span>
+  </label>`;
+}
+
+
 /* ---------------- 模块开关 ---------------- */
 function toggleModule(key, on) {
   const meta = {
@@ -289,7 +503,7 @@ function viewOverview() {
     <div class="stat">
       <div class="lab">组件</div>
       <div class="val">${compCount}</div>
-      <div class="foot">平均 <b>${(compCount / appCount).toFixed(1)}</b> 个 / 应用</div>
+      <div class="foot">平均 <b>${appCount ? (compCount / appCount).toFixed(1) : '0.0'}</b> 个 / 应用</div>
     </div>
     <div class="stat">
       <div class="lab">工作负载</div>
@@ -419,6 +633,22 @@ function viewOverview() {
 /* ---------- 应用列表 ---------- */
 function viewApps() {
   setCrumb('应用列表');
+  if (!DB.apps.length) {
+    return `<div class="page-head">
+      <div><div class="ttl">应用</div>
+        <div class="sub">应用是业务交付单元，下辖若干组件，组件进一步展开为工作负载。</div></div>
+      <div class="acts"><button class="btn primary" onclick="newApp()">${icon('plus', '', 14)}新建应用</button></div>
+    </div>
+    <div class="card"><div class="empty">
+      <div class="eic">${icon('box', '', 22)}</div>
+      <h3>还没有应用</h3>
+      <p>新建第一个应用后，就能在它下面创建组件与工作负载，形成完整的三层模型。</p>
+      <div style="display:flex;gap:8px;justify-content:center">
+        <button class="btn primary" onclick="newApp()">${icon('plus', '', 14)}新建应用</button>
+        <button class="btn" onclick="resetSnapshot()">重置演示数据</button>
+      </div>
+    </div></div>`;
+  }
   return `
   <div class="page-head">
     <div>
@@ -477,8 +707,20 @@ function viewApps() {
 /* ---------- 应用详情 ---------- */
 function viewAppDetail(id) {
   const app = DB.apps.find(a => a.id === id) || DB.apps[0];
+  if (!app) {
+    setCrumb('应用');
+    return `<div class="empty">
+      <div class="eic">${icon('box', '', 22)}</div>
+      <h3>没有可展示的应用</h3>
+      <p>演示数据中的最后一条应用已被删除。可以新建一个应用，或重置演示数据。</p>
+      <div style="display:flex;gap:8px;justify-content:center">
+        <button class="btn primary" onclick="newApp()">${icon('plus', '', 14)}新建应用</button>
+        <button class="btn" onclick="resetSnapshot()">重置演示数据</button>
+      </div>
+    </div>`;
+  }
   setCrumb(app.name);
-  if (!S.appComp || !app.components.find(c => c.name === S.appComp)) S.appComp = app.components[0].name;
+  if (!S.appComp || !app.components.find(c => c.name === S.appComp)) S.appComp = app.components[0] ? app.components[0].name : null;
 
   const wlCount = app.components.reduce((s, c) => s + c.workloads.length, 0);
   const meshOn = S.modules.mesh;
@@ -516,8 +758,8 @@ function viewAppDetail(id) {
     </div>
     <div class="acts">
       <button class="btn" onclick="location.hash='/cicd'">${icon('flow', '', 14)}发布</button>
-      <button class="btn" onclick="toast('扩缩容面板（原型）')">扩缩容</button>
-      <button class="btn" onclick="toast('更多操作（原型）')">···</button>
+      <button class="btn" onclick="scaleApp(DB.apps.find(a=>a.id==='${app.id}'))">扩缩容</button>
+      <button class="btn" onclick="appMenu(DB.apps.find(a=>a.id==='${app.id}'))">···</button>
     </div>
   </div>
 
@@ -591,12 +833,25 @@ function appTabBody(app) {
 
   if (S.appTab === 'components') {
     const comp = app.components.find(c => c.name === S.appComp) || app.components[0];
+    if (!comp) {
+      return `<div class="empty" style="padding:38px 20px">
+        <div class="eic">${icon('layers', '', 22)}</div>
+        <h3>这个应用还没有组件</h3>
+        <p>组件是构建与发布的边界，对应一个镜像与版本；工作负载从组件派生。先创建第一个组件。</p>
+        <button class="btn primary" onclick="newComponent('${app.id}')">${icon('plus', '', 14)}新建组件</button>
+      </div>`;
+    }
     const wl = comp.workloads.find(w => w.name === S.appWl);
 
     return `
     <div class="grid g12" style="align-items:start">
       <div class="card" style="box-shadow:none">
-        <div class="card-head" style="padding:11px 14px"><div class="t" style="font-size:12px">资源树</div></div>
+        <div class="card-head" style="padding:11px 14px">
+          <div class="t" style="font-size:12px">资源树</div>
+          <div class="r">
+            <button class="mini-act" title="新建组件" onclick="newComponent('${app.id}')">${icon('plus', '', 13)}</button>
+          </div>
+        </div>
         <div class="card-body" style="padding:8px">
           <div class="tree">
             <div class="tree-node" style="font-weight:600;color:var(--text);cursor:default">
@@ -623,8 +878,10 @@ function appTabBody(app) {
             <div class="d mono" style="margin-top:2px">${esc(comp.image)}:${esc(comp.version)} · ${esc(comp.runtime)}</div>
           </div>
           <div class="r">
+            <button class="btn sm ghost" onclick="newWorkload('${app.id}','${comp.name}')">${icon('plus', '', 12)}工作负载</button>
             <button class="btn sm" onclick="toast('组件配置（原型）')">配置</button>
             <button class="btn sm primary" onclick="toast('已触发组件发布')">${icon('send', '', 12)}发布</button>
+            <button class="mini-act danger" title="删除组件" onclick="deleteComponent('${app.id}','${comp.name}')">${icon('archive', '', 13)}</button>
           </div>
         </div>
         <table class="table">
@@ -633,7 +890,7 @@ function appTabBody(app) {
             <th>CPU / 内存</th>${meshOn ? '<th>Mesh</th>' : ''}<th class="right">重启</th>
           </tr></thead>
           <tbody>
-            ${comp.workloads.map(w => `
+            ${comp.workloads.length ? comp.workloads.map(w => `
               <tr class="clickable" onclick="selectWl('${w.name}')">
                 <td class="name">${esc(w.name)}<div class="sub mono">${esc(w.image)}</div></td>
                 <td><span class="chip">${esc(w.kind)}</span></td>
@@ -643,7 +900,13 @@ function appTabBody(app) {
                 <td class="mono" style="font-size:11px">${esc(w.cpu)}<div class="sub">${esc(w.mem)}</div></td>
                 ${meshOn ? `<td>${w.mesh === '已注入' ? '<span class="badge info">已注入</span>' : w.mesh === '网关' ? '<span class="badge purple">网关</span>' : '<span class="badge muted">—</span>'}</td>` : ''}
                 <td class="right num">${w.restarts}</td>
-              </tr>`).join('')}
+              </tr>`).join('') : `
+              <tr><td colspan="${meshOn ? 8 : 7}">
+                <div class="empty" style="padding:28px 16px">
+                  <p style="margin:0 0 12px">该组件还没有工作负载，副本与资源规格无从声明。</p>
+                  <button class="btn sm primary" onclick="newWorkload('${app.id}','${comp.name}')">${icon('plus', '', 12)}新建工作负载</button>
+                </div>
+              </td></tr>`}
           </tbody>
         </table>
         ${!meshOn ? `<div style="padding:10px 16px;border-top:1px solid var(--border);font-size:11.5px;color:var(--text-3);display:flex;align-items:center;gap:6px">
@@ -675,6 +938,7 @@ function appTabBody(app) {
             <button class="btn sm" onclick="toast('进入容器终端（原型）')">终端</button>
             <button class="btn sm" onclick="toast('工作负载 YAML（原型）')">YAML</button>
             <button class="btn sm" onclick="toast('已重启工作负载')">${icon('refresh', '', 12)}重启</button>
+            <button class="btn sm danger" style="margin-left:auto" onclick="deleteWorkload('${app.id}','${comp.name}','${wl.name}')">删除</button>
           </div>
         </div>` : ''}
       </div>
@@ -887,6 +1151,14 @@ function buildAppTopo(app) {
 }
 
 function appTopologyView(app) {
+  if (!app.components.length) {
+    return `<div class="empty">
+      <div class="eic">${icon('topo2', '', 22)}</div>
+      <h3>还没有可绘制的组件</h3>
+      <p>拓扑由组件间的声明式依赖生成。先创建组件，节点与连线就会出现在这里。</p>
+      <button class="btn primary" onclick="newComponent('${app.id}')">${icon('plus', '', 14)}新建组件</button>
+    </div>`;
+  }
   const { svg, edgeCount } = buildAppTopo(app);
   const wlTotal = app.components.reduce((s, c) => s + c.workloads.length, 0);
   const multiWhere = app.components.filter(c => new Set(c.workloads.map(w => w.where)).size > 1).length;
@@ -2059,6 +2331,8 @@ function viewDesign() {
     <div class="card-body">
       <div class="grid g2" style="gap:10px">
         ${[
+          ['创建闭环', '应用列表 → 新建应用，三步向导一次创建应用 / 组件 / 工作负载', '/apps'],
+          ['扩缩容与删除', '应用详情右上「扩缩容」与「···」，真实改写演示数据', '/apps/retail-platform'],
           ['模块开关', '平台管理 → 模块管理，关闭 Service Mesh 后观察应用详情页签变化', '/admin/modules'],
           ['三层资源树', '应用详情 → 组件与工作负载，左侧树可逐层下钻', '/apps/retail-platform'],
           ['组件拓扑', '应用详情 → 组件拓扑，按依赖分层，点节点可下钻', '/apps/retail-platform'],
@@ -2074,22 +2348,460 @@ function viewDesign() {
           </div>`).join('')}
       </div>
     </div>
+  </div>
+
+  <div class="card mt16">
+    <div class="card-head"><div class="t">五、原型数据</div><div class="r tiny muted">localStorage</div></div>
+    <div class="card-body" style="display:flex;align-items:center;gap:16px">
+      <div class="tiny" style="color:var(--text-2);line-height:1.75;flex:1">
+        新建的应用、组件与工作负载，以及删除、扩缩容的结果都会写入
+        <span class="mono">paas.prototype.db.v1</span>，刷新后依然保留，因此可以完整演示一次「创建 → 变更 → 回收」的闭环。
+        模块开关单独存放在 <span class="mono">paas.prototype.modules.v1</span>。
+      </div>
+      <button class="btn danger" onclick="resetSnapshot()">${icon('refresh', '', 14)}重置演示数据</button>
+    </div>
   </div>`;
 }
 
-/* ---------- 其它动作 ---------- */
+/* ==========================================================
+   创建闭环：应用 → 组件 → 工作负载
+   所有写操作都会 saveSnapshot()，刷新后仍保留
+   ========================================================== */
+
+const COMP_ROLES = ['核心服务', '入口网关', '边缘采集', '异步任务', '渠道适配', '流接入', '协议解析', '推理引擎', '规则计算', '对账任务'];
+const RUNTIMES = ['Java 17 · Spring Boot 3.2', 'Go 1.22', 'Node.js 20', 'Python 3.12', 'Rust 1.77', 'Envoy 1.29', 'Nginx 1.25'];
+const WL_KINDS = [['Deployment', 'Deployment · 无状态服务'], ['StatefulSet', 'StatefulSet · 有状态'], ['CronJob', 'CronJob · 定时任务'], ['EdgeApp', 'EdgeApp · 边缘应用']];
+const wlSpots = () => S.modules.edge
+  ? [['云端', '云端集群'], ['边缘', '边缘节点'], ['端侧', '端设备']]
+  : [['云端', '云端集群']];
+const appDomains = () => [...new Set(['零售业务域', '交易域', '基础域', '支付域', '智能边缘', ...DB.apps.map(a => a.domain)])];
+
+function clampInt(v, min, max, def) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, n));
+}
+function clusterOf(where) {
+  if (where === '边缘') return 'edge-sh-store';
+  if (where === '端侧') return 'edge-device-pool';
+  return (curEnv() && curEnv().cluster) || 'prod-shanghai-01';
+}
+
+/* 由向导/表单数据构造工作负载 */
+function buildWorkload(src, comp) {
+  const kind = src.wlKind || 'Deployment';
+  const where = src.wlWhere || '云端';
+  const reps = clampInt(src.wlReplicas, 0, 50, 2);
+  return {
+    name: src.wlName,
+    kind,
+    ready: kind === 'CronJob' ? '—' : `${reps}/${reps}`,
+    image: src.wlImage || comp.version || 'v1.0.0',
+    cpu: src.wlCpu || '1 / 2c',
+    mem: src.wlMem || '2 / 4Gi',
+    status: kind === 'CronJob' ? '已完成' : reps > 0 ? '运行中' : '已停止',
+    where,
+    cluster: clusterOf(where),
+    mesh: S.modules.mesh && where === '云端' ? '已注入' : '—',
+    restarts: 0,
+    age: '刚刚'
+  };
+}
+
+/* ---------- 新建应用：三步向导 ---------- */
 function newApp() {
-  openModal({
+  wizard({
     title: '新建应用',
-    desc: '应用创建后可在其下新增组件与工作负载。',
-    okText: '创建',
-    body: `<div class="field"><label>应用名称</label><input class="input" placeholder="例如：会员营销中心" /></div>
-      <div class="field"><label>业务域</label><select class="input"><option>零售业务域</option><option>交易域</option><option>基础域</option><option>智能边缘</option></select></div>
-      <div class="field"><label>负责人</label><input class="input" value="${DB.user.name}" /></div>
-      <div class="field"><label>优先级</label><select class="input"><option>P1</option><option>P0</option><option>P2</option></select></div>`,
-    onOk: () => toast('应用已创建（原型演示）', 'ok')
+    desc: '应用是业务交付单元。创建后可继续下钻添加组件与工作负载。',
+    okText: '创建应用',
+    state: {
+      domain: DB.apps[0] ? DB.apps[0].domain : '零售业务域',
+      owner: DB.user.name,
+      level: 'P1',
+      env: '生产环境',
+      desc: '',
+      createComp: true,
+      compName: '', compRole: '核心服务', compImage: '',
+      compRuntime: 'Java 17 · Spring Boot 3.2', compVersion: 'v1.0.0',
+      createWl: true,
+      wlName: '', wlKind: 'Deployment', wlReplicas: '2', wlWhere: '云端',
+      wlCpu: '1 / 2c', wlMem: '2 / 4Gi', wlImage: ''
+    },
+    steps: [
+      {
+        name: '基本信息',
+        render: s => `
+          ${fField('应用名称', fInput('name', s.name, '例如：会员营销中心'), '应用名称在平台内唯一，建议使用业务名词', true)}
+          <div class="form-row">
+            ${fField('业务域', fSelect('domain', appDomains(), s.domain))}
+            ${fField('负责人', fInput('owner', s.owner, '张明'))}
+          </div>
+          <div class="form-row">
+            ${fField('优先级', fSelect('level', ['P0', 'P1', 'P2'], s.level), 'P0 变更需额外审批')}
+            ${fField('部署环境', fSelect('env', ['生产环境', '预发环境', '测试环境'], s.env))}
+          </div>
+          ${fField('应用说明', `<textarea class="input" data-k="desc" rows="2" placeholder="一句话说明这个应用承载的业务" style="height:auto;padding:8px 10px;resize:vertical">${esc(s.desc || '')}</textarea>`)}`,
+        validate: s => {
+          if (!s.name) return '请填写应用名称';
+          if (s.name.length > 24) return '应用名称不超过 24 个字符';
+          if (DB.apps.some(a => a.name === s.name)) return `已存在同名应用「${s.name}」，请换一个名称`;
+          return null;
+        }
+      },
+      {
+        name: '首个组件',
+        render: s => `
+          ${fCheck('createComp', '同时创建首个组件', s.createComp, '组件是构建与发布的边界，通常对应一个镜像', 'compFields')}
+          <div id="compFields" class="float-fields">
+            ${fField('组件名称', fInput('compName', s.compName, '例如：member-service'), '小写字母、数字与短横线', true)}
+            <div class="form-row">
+              ${fField('角色', fSelect('compRole', COMP_ROLES, s.compRole))}
+              ${fField('运行时', fSelect('compRuntime', RUNTIMES, s.compRuntime))}
+            </div>
+            <div class="form-row">
+              ${fField('镜像仓库', fInput('compImage', s.compImage, '默认 hub.corp.io/demo/<组件名>'))}
+              ${fField('初始版本', fInput('compVersion', s.compVersion))}
+            </div>
+            ${fCheck('createWl', '同时创建首个工作负载', s.createWl, '工作负载是调度的最小单位，也可以稍后再加', 'wlFields')}
+            <div id="wlFields" class="float-fields">
+              <div class="form-row">
+                ${fField('工作负载名称', fInput('wlName', s.wlName, '例如：member-service-api'), '', true)}
+                ${fField('类型', fSelect('wlKind', WL_KINDS, s.wlKind))}
+              </div>
+              <div class="form-row">
+                ${fField('副本数', fInput('wlReplicas', s.wlReplicas, '2', 'number'), 'CronJob 无需副本')}
+                ${fField('调度位置', fSelect('wlWhere', wlSpots(), s.wlWhere))}
+              </div>
+              <div class="form-row">
+                ${fField('CPU 规格', fSelect('wlCpu', ['0.2 / 1c', '0.5 / 2c', '1 / 2c', '2 / 4c', '4 / 8c'], s.wlCpu))}
+                ${fField('内存规格', fSelect('wlMem', ['512Mi / 1Gi', '1Gi / 2Gi', '2 / 4Gi', '4 / 8Gi', '8 / 16Gi'], s.wlMem))}
+              </div>
+            </div>
+          </div>`,
+        validate: s => {
+          if (!s.createComp) return null;
+          if (!s.compName) return '请填写组件名称，或取消「同时创建首个组件」';
+          if (!NAME_RE.test(s.compName)) return '组件名称只能包含小写字母、数字与短横线，并以字母或数字开头';
+          if (s.createWl) {
+            if (!s.wlName) return '请填写工作负载名称，或取消「同时创建首个工作负载」';
+            if (!NAME_RE.test(s.wlName)) return '工作负载名称只能包含小写字母、数字与短横线';
+            if (s.wlName === s.compName) return '工作负载名称不能与组件同名';
+          }
+          return null;
+        }
+      },
+      {
+        name: '确认创建',
+        render: s => {
+          const wl = s.createComp && s.createWl;
+          return `
+          <div class="kv" style="grid-template-columns:88px 1fr;row-gap:11px">
+            <dt>应用</dt><dd><b>${esc(s.name)}</b> <span class="chip" style="margin-left:4px">${esc(s.level)}</span></dd>
+            <dt>业务域</dt><dd>${esc(s.domain)} · 负责人 ${esc(s.owner || DB.user.name)}</dd>
+            <dt>环境</dt><dd>${esc(s.env)}</dd>
+            <dt>说明</dt><dd style="color:var(--text-2)">${esc(s.desc || '未填写')}</dd>
+            <dt>组件</dt><dd>${s.createComp ? `<span class="mono">${esc(s.compName)}</span> · ${esc(s.compRole)} · ${esc(s.compVersion)}` : '<span class="muted">暂不创建</span>'}</dd>
+            <dt>工作负载</dt><dd>${wl ? `<span class="mono">${esc(s.wlName)}</span> · ${esc(s.wlKind)} · ${s.wlKind === 'CronJob' ? '定时触发' : `${clampInt(s.wlReplicas, 0, 50, 2)} 副本`} · ${esc(s.wlWhere)}` : '<span class="muted">暂不创建</span>'}</dd>
+          </div>
+          <div class="warn-box" style="margin-top:14px">
+            应用、组件、工作负载将同时创建，只写入本地演示数据，不会影响任何真实集群。
+          </div>`;
+        }
+      }
+    ],
+    onSubmit: s => {
+      const id = nextAppId(s.name);
+      const comps = [];
+      let firstComp = null;
+      if (s.createComp) {
+        const comp = {
+          name: s.compName,
+          role: s.compRole,
+          runtime: s.compRuntime,
+          image: s.compImage || `hub.corp.io/demo/${s.compName}`,
+          version: s.compVersion || 'v1.0.0',
+          workloads: []
+        };
+        if (s.createWl) comp.workloads.push(buildWorkload(s, comp));
+        comps.push(comp);
+        firstComp = comp.name;
+      }
+      DB.apps.unshift({
+        id,
+        name: s.name,
+        domain: s.domain,
+        owner: s.owner || DB.user.name,
+        level: s.level,
+        status: '运行中',
+        health: comps.length ? 100 : 0,
+        desc: s.desc || '新建应用，尚未填写说明。',
+        updated: nowStamp(),
+        envs: [s.env],
+        components: comps,
+        pipelines: [],
+        events: [{ t: '刚刚', k: 'ok', tx: `应用 <b>${esc(s.name)}</b> 创建完成` }]
+      });
+      DB.deps[id] = [];
+      DB.access[id] = [];
+      saveSnapshot();
+      S.appComp = firstComp;
+      S.appWl = null;
+      S.appTab = 'components';
+      goto(`#/apps/${id}/components`);
+      toast(`应用 <b>${esc(s.name)}</b> 已创建`, 'ok');
+      return null;
+    }
   });
 }
+
+/* ---------- 新建组件 ---------- */
+function newComponent(appId) {
+  const app = DB.apps.find(a => a.id === appId);
+  if (!app) return;
+  formModal({
+    title: '新建组件',
+    desc: `归属于应用「${app.name}」。组件是构建与发布的边界，下辖若干工作负载。`,
+    okText: '创建组件',
+    body: `
+      ${fField('组件名称', fInput('name', '', '例如：member-service'), '小写字母、数字与短横线', true)}
+      <div class="form-row">
+        ${fField('角色', fSelect('role', COMP_ROLES, '核心服务'))}
+        ${fField('运行时', fSelect('runtime', RUNTIMES, 'Java 17 · Spring Boot 3.2'))}
+      </div>
+      <div class="form-row">
+        ${fField('镜像仓库', fInput('image', '', '默认 hub.corp.io/demo/<组件名>'))}
+        ${fField('初始版本', fInput('version', 'v1.0.0'))}
+      </div>
+      ${fCheck('withWl', '同时创建默认工作负载', true, `Deployment · 2 副本 · ${clusterOf('云端')}`)}`,
+    onSubmit: st => {
+      if (!st.name) return '请填写组件名称';
+      if (!NAME_RE.test(st.name)) return '组件名称只能包含小写字母、数字与短横线，并以字母或数字开头';
+      if (app.components.some(c => c.name === st.name)) return `应用内已存在组件「${st.name}」`;
+      const comp = {
+        name: st.name,
+        role: st.role,
+        runtime: st.runtime,
+        image: st.image || `hub.corp.io/demo/${st.name}`,
+        version: st.version || 'v1.0.0',
+        workloads: []
+      };
+      if (st.withWl) {
+        comp.workloads.push(buildWorkload({
+          wlName: `${st.name}-api`, wlKind: 'Deployment', wlReplicas: '2',
+          wlWhere: '云端', wlCpu: '1 / 2c', wlMem: '2 / 4Gi'
+        }, comp));
+      }
+      app.components.push(comp);
+      app.updated = nowStamp();
+      if (app.health === 0) app.health = 100;
+      app.events.unshift({ t: clockNow(), k: 'ok', tx: `组件 <b>${esc(comp.name)}</b> 已创建` });
+      saveSnapshot();
+      S.appComp = comp.name;
+      S.appWl = null;
+      S.appTab = 'components';
+      goto(`#/apps/${app.id}/components`);
+      toast(`组件 <b>${esc(comp.name)}</b> 已创建，含 ${comp.workloads.length} 个工作负载`, 'ok');
+      return null;
+    }
+  });
+}
+
+/* ---------- 新建工作负载 ---------- */
+function newWorkload(appId, compName) {
+  const app = DB.apps.find(a => a.id === appId);
+  const comp = app && app.components.find(c => c.name === compName);
+  if (!comp) return;
+  formModal({
+    title: '新建工作负载',
+    desc: `归属于组件「${comp.name}」。工作负载是调度的最小单位，决定副本、资源与调度位置。`,
+    okText: '创建工作负载',
+    body: `
+      ${fField('工作负载名称', fInput('name', '', `例如：${comp.name}-api`), '小写字母、数字与短横线', true)}
+      <div class="form-row">
+        ${fField('类型', fSelect('kind', WL_KINDS, 'Deployment'))}
+        ${fField('副本数', fInput('replicas', '2', '2', 'number'), 'CronJob 无需副本')}
+      </div>
+      <div class="form-row">
+        ${fField('调度位置', fSelect('where', wlSpots(), '云端'))}
+        ${fField('镜像版本', fInput('image', comp.version))}
+      </div>
+      <div class="form-row">
+        ${fField('CPU 规格', fSelect('cpu', ['0.2 / 1c', '0.5 / 2c', '1 / 2c', '2 / 4c', '4 / 8c'], '1 / 2c'))}
+        ${fField('内存规格', fSelect('mem', ['512Mi / 1Gi', '1Gi / 2Gi', '2 / 4Gi', '4 / 8Gi', '8 / 16Gi'], '2 / 4Gi'))}
+      </div>
+      ${S.modules.mesh ? '<div class="tiny muted">云端工作负载将自动注入 Sidecar（Service Mesh 已启用）。</div>' : ''}`,
+    onSubmit: st => {
+      if (!st.name) return '请填写工作负载名称';
+      if (!NAME_RE.test(st.name)) return '工作负载名称只能包含小写字母、数字与短横线，并以字母或数字开头';
+      if (comp.workloads.some(w => w.name === st.name)) return `组件内已存在工作负载「${st.name}」`;
+      const wl = buildWorkload({
+        wlName: st.name, wlKind: st.kind, wlReplicas: st.replicas,
+        wlWhere: st.where, wlCpu: st.cpu, wlMem: st.mem, wlImage: st.image
+      }, comp);
+      comp.workloads.push(wl);
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: 'ok', tx: `工作负载 <b>${esc(wl.name)}</b> 已创建（${esc(wl.kind)} · ${esc(wl.ready)}）` });
+      saveSnapshot();
+      S.appComp = comp.name;
+      S.appWl = wl.name;
+      S.appTab = 'components';
+      goto(`#/apps/${app.id}/components`);
+      toast(`工作负载 <b>${esc(wl.name)}</b> 已创建`, 'ok');
+      return null;
+    }
+  });
+}
+
+/* ---------- 删除 ---------- */
+function deleteWorkload(appId, compName, wlName) {
+  const app = DB.apps.find(a => a.id === appId);
+  const comp = app && app.components.find(c => c.name === compName);
+  const wl = comp && comp.workloads.find(w => w.name === wlName);
+  if (!wl) return;
+  formModal({
+    title: '删除工作负载？',
+    desc: `${compName} / ${wlName}`,
+    danger: true,
+    okText: '删除',
+    body: `<div class="danger-box">删除后该负载的副本会被回收，相关告警与监控曲线一并移除。此操作不可撤销。</div>`,
+    onSubmit: () => {
+      comp.workloads = comp.workloads.filter(w => w.name !== wlName);
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: 'warn', tx: `工作负载 <b>${esc(wlName)}</b> 已删除` });
+      saveSnapshot();
+      S.appWl = null;
+      goto(`#/apps/${app.id}/components`);
+      toast(`工作负载 <b>${esc(wlName)}</b> 已删除`, 'warn');
+      return null;
+    }
+  });
+}
+
+function deleteComponent(appId, compName) {
+  const app = DB.apps.find(a => a.id === appId);
+  const comp = app && app.components.find(c => c.name === compName);
+  if (!comp) return;
+  const wlCount = comp.workloads.length;
+  formModal({
+    title: '删除组件？',
+    desc: `${app.name} / ${compName}`,
+    danger: true,
+    okText: '删除组件',
+    body: `<div class="danger-box">
+        该组件下辖 <b>${wlCount}</b> 个工作负载，将一并删除；绑定到该组件的流水线需要重新指定构建对象。
+      </div>
+      ${app.components.length === 1 ? '<div class="warn-box" style="margin-top:10px">这是应用内最后一个组件，删除后应用将没有任何可部署单元。</div>' : ''}`,
+    onSubmit: () => {
+      app.components = app.components.filter(c => c.name !== compName);
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: 'warn', tx: `组件 <b>${esc(compName)}</b> 及其 ${wlCount} 个工作负载已删除` });
+      saveSnapshot();
+      S.appComp = app.components[0] ? app.components[0].name : null;
+      S.appWl = null;
+      goto(`#/apps/${app.id}/components`);
+      toast(`组件 <b>${esc(compName)}</b> 已删除`, 'warn');
+      return null;
+    }
+  });
+}
+
+function deleteApp(app) {
+  const wlCount = app.components.reduce((s, c) => s + c.workloads.length, 0);
+  formModal({
+    title: '删除应用？',
+    desc: `${app.name} · ${app.level}`,
+    danger: true,
+    okText: '删除应用',
+    body: `<div class="danger-box">
+        将级联删除 <b>${app.components.length}</b> 个组件、<b>${wlCount}</b> 个工作负载，以及该应用的访问入口与依赖声明。
+      </div>
+      ${fField('输入应用名称确认', fInput('confirm', '', app.name), `需完整输入「${app.name}」`)}`,
+    onSubmit: st => {
+      if (st.confirm !== app.name) return `请输入完整名称「${app.name}」以确认删除`;
+      DB.apps = DB.apps.filter(a => a.id !== app.id);
+      delete DB.access[app.id];
+      delete DB.deps[app.id];
+      saveSnapshot();
+      S.appComp = null;
+      S.appWl = null;
+      goto('#/apps');
+      toast(`应用 <b>${esc(app.name)}</b> 已删除`, 'warn');
+      return null;
+    }
+  });
+}
+
+/* ---------- 应用级更多操作 ---------- */
+function appMenu(app) {
+  const stopped = app.status === '已停止';
+  const mask = formModal({
+    title: `管理「${app.name}」`,
+    desc: '停用只影响调度与入口，不删除任何配置。',
+    okText: '关闭',
+    plain: true,
+    hideCancel: true,
+    body: `<div class="menu-list">
+      <div class="mrow" data-act2="toggle">
+        ${icon(stopped ? 'send' : 'archive', '', 15)}
+        <div><b>${stopped ? '启用应用' : '停用应用'}</b><span>${stopped ? '恢复调度与访问入口' : '暂停所有工作负载，入口保持配置'}</span></div>
+      </div>
+      <div class="mrow danger" data-act2="del">
+        ${icon('archive', '', 15)}
+        <div><b>删除应用</b><span>级联删除组件、工作负载与访问入口</span></div>
+      </div>
+    </div>`,
+    onSubmit: () => null
+  });
+  mask.querySelector('[data-act2=toggle]').onclick = () => {
+    app.status = stopped ? '运行中' : '已停止';
+    app.updated = nowStamp();
+    app.events.unshift({ t: clockNow(), k: stopped ? 'ok' : 'warn', tx: `应用 <b>${esc(app.name)}</b> 已${stopped ? '启用' : '停用'}` });
+    saveSnapshot();
+    mask.remove();
+    route();
+    toast(`应用已${stopped ? '启用' : '停用'}`, stopped ? 'ok' : 'warn');
+  };
+  mask.querySelector('[data-act2=del]').onclick = () => { mask.remove(); deleteApp(app); };
+}
+
+/* ---------- 扩缩容 ---------- */
+function scaleApp(app) {
+  const rows = app.components.flatMap(c => c.workloads.filter(w => w.kind !== 'CronJob').map(w => ({ comp: c.name, wl: w })));
+  if (!rows.length) return toast('该应用暂无可扩缩容的工作负载', 'warn');
+  formModal({
+    title: '扩缩容',
+    desc: `${app.name} · ${rows.length} 个可调副本的工作负载`,
+    okText: '应用变更',
+    wide: true,
+    body: rows.map(({ comp, wl }, i) => {
+      const cur = parseInt(String(wl.ready).split('/')[0], 10);
+      return `<div class="scale-row">
+        <div class="nm"><b>${esc(wl.name)}</b><span>${esc(comp)} · ${esc(wl.kind)} · ${esc(wl.where)}</span></div>
+        <span class="cur">当前 ${Number.isFinite(cur) ? cur : 0}</span>
+        <input type="number" min="0" max="50" data-k="r${i}" value="${Number.isFinite(cur) ? cur : 0}" />
+      </div>`;
+    }).join(''),
+    onSubmit: st => {
+      const changes = [];
+      rows.forEach(({ wl }, i) => {
+        const before = parseInt(String(wl.ready).split('/')[0], 10) || 0;
+        const n = clampInt(st['r' + i], 0, 50, before);
+        if (n === before) return;
+        wl.ready = `${n}/${n}`;
+        wl.status = n === 0 ? '已停止' : '运行中';
+        changes.push(`${wl.name} ${before} → ${n}`);
+      });
+      if (!changes.length) return '副本数没有变化';
+      app.updated = nowStamp();
+      app.events.unshift({ t: clockNow(), k: 'ok', tx: `应用扩缩容：${changes.map(esc).join('，')}` });
+      saveSnapshot();
+      goto(`#/apps/${app.id}/components`);
+      toast(`已应用 ${changes.length} 项副本变更`, 'ok');
+      return null;
+    }
+  });
+}
+
 
 /* ==========================================================
    路由
