@@ -168,6 +168,62 @@ function setReplicas(w, n) {
   w.status = n === 0 ? '已停止' : '运行中';
 }
 
+/* ---------------- 实体解析 ----------------
+   组件与工作负载都有稳定的 id，name 只是展示名与唯一性约束。
+   解析器同时接受 id 和 name：旧快照、旧链接、旧书签都能继续工作。 */
+function findComp(app, key) {
+  if (!app || !key) return null;
+  return app.components.find(c => c.id === key) || app.components.find(c => c.name === key) || null;
+}
+function findWl(comp, key) {
+  if (!comp || !key) return null;
+  return comp.workloads.find(w => w.id === key) || comp.workloads.find(w => w.name === key) || null;
+}
+function compLabel(app, scope) {
+  if (scope === 'all') return '全部组件';
+  const c = findComp(app, scope);
+  return c ? c.name : scope;
+}
+function scopeMatches(app, scope, key) {
+  if (scope === 'all' || key === 'all') return scope === key;
+  const c = findComp(app, key);
+  return c ? (scope === c.id || scope === c.name) : scope === key;
+}
+
+/* 迁移：把「按名字」的引用改为按 id，幂等。
+   依赖边、配置作用域一旦按名字存，重命名组件就会静默断链。 */
+function migrateRefs() {
+  DB.apps.forEach(app => {
+    const seen = new Set();
+    let seq = 0;
+    app.components.forEach(c => {
+      if (!c.id) c.id = `cmp-${slugify(c.name) || 'c'}`;
+      while (seen.has(c.id)) c.id = `cmp-${slugify(c.name) || 'c'}-${++seq}`;
+      seen.add(c.id);
+      c.workloads.forEach(w => {
+        if (!w.id) w.id = `wl-${slugify(w.name) || 'w'}`;
+        while (seen.has(w.id)) w.id = `wl-${slugify(w.name) || 'w'}-${++seq}`;
+        seen.add(w.id);
+      });
+    });
+    const idOf = new Map(app.components.map(c => [c.name, c.id]));
+    (DB.deps[app.id] || []).forEach(e => {
+      if (!Array.isArray(e)) return;
+      if (idOf.has(e[0])) e[0] = idOf.get(e[0]);
+      if (idOf.has(e[1])) e[1] = idOf.get(e[1]);
+    });
+    (DB.config[app.id] || []).forEach(c => {
+      if (c.scope !== 'all' && idOf.has(c.scope)) c.scope = idOf.get(c.scope);
+    });
+    (DB.pipelines || []).forEach(p => {
+      if (p.appId === app.id && !p.compId && idOf.has(p.comp)) p.compId = idOf.get(p.comp);
+    });
+    (DB.releases || []).forEach(r => {
+      if (r.appId === app.id && !r.compId && idOf.has(r.comp)) r.compId = idOf.get(r.comp);
+    });
+  });
+}
+
 /* ---------------- 工具 ---------------- */
 const $ = (s, r = document) => r.querySelector(s);
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
@@ -940,7 +996,7 @@ function viewAppDetail(id) {
     </div>`;
   }
   setCrumb(app.name);
-  if (!S.appComp || !app.components.find(c => c.name === S.appComp)) S.appComp = app.components[0] ? app.components[0].name : null;
+  if (!S.appComp || !findComp(app, S.appComp)) S.appComp = app.components[0] ? app.components[0].name : null;
 
   const wlCount = app.components.reduce((s, c) => s + c.workloads.length, 0);
   const meshOn = S.modules.mesh;
@@ -1053,7 +1109,7 @@ function appTabBody(app) {
   }
 
   if (S.appTab === 'components') {
-    const comp = app.components.find(c => c.name === S.appComp) || app.components[0];
+    const comp = findComp(app, S.appComp) || app.components[0];
     if (!comp) {
       return `<div class="empty" style="padding:38px 20px">
         <div class="eic">${icon('layers', '', 22)}</div>
@@ -1062,7 +1118,7 @@ function appTabBody(app) {
         <button class="btn primary" onclick="newComponent('${app.id}')">${icon('plus', '', 14)}新建组件</button>
       </div>`;
     }
-    const wl = comp.workloads.find(w => w.name === S.appWl);
+    const wl = findWl(comp, S.appWl);
 
     return `
     <div class="grid g12" style="align-items:start">
@@ -1232,7 +1288,7 @@ function appTabBody(app) {
 
   if (S.appTab === 'config') {
     // 作用域可能停在上一个应用的组件上，切应用后回落到全部
-    if (S.cfgScope !== 'all-app' && S.cfgScope !== 'all' && !app.components.some(c => c.name === S.cfgScope)) S.cfgScope = 'all-app';
+    if (S.cfgScope !== 'all-app' && S.cfgScope !== 'all' && !findComp(app, S.cfgScope)) S.cfgScope = 'all-app';
     return appConfigView(app);
   }
 
@@ -1312,9 +1368,17 @@ function orthPath(x1, y1, x2, y2, off) {
 }
 
 function buildAppTopo(app) {
-  const names = app.components.map(c => c.name);
-  const edges = (DB.deps[app.id] || []).filter(([a, b]) => names.includes(a) && names.includes(b));
-  const { pos, width, height } = layoutGraph(names, edges);
+  /* 图节点以组件 id 为 key，依赖边按 id 解析；name 只用于展示 */
+  const byKey = {};
+  app.components.forEach(c => { byKey[c.id] = c; byKey[c.name] = c; });
+  const keys = app.components.map(c => c.id);
+  const edges = (DB.deps[app.id] || [])
+    .map(([a, b, label, kind]) => {
+      const ca = byKey[a], cb = byKey[b];
+      return ca && cb ? [ca.id, cb.id, label, kind] : null;
+    })
+    .filter(Boolean);
+  const { pos, width, height } = layoutGraph(keys, edges);
 
   let svg = `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}"
     style="max-width:100%;height:auto;display:block;margin:0 auto">`;
@@ -1344,7 +1408,7 @@ function buildAppTopo(app) {
   });
 
   app.components.forEach(c => {
-    const p = pos[c.name];
+    const p = pos[c.id];
     const col = ROLE_COLOR[c.role] || ROLE_COLOR._;
     const wheres = [...new Set(c.workloads.map(w => w.where))].join(' / ');
     const bad = c.workloads.some(w => w.status !== '运行中' && w.status !== '已完成');
@@ -1372,7 +1436,7 @@ function closeTopModal() {
 function editDeps(appId) {
   const app = DB.apps.find(a => a.id === appId);
   if (!app) return;
-  const comps = app.components.map(c => c.name);
+  const comps = app.components.map(c => [c.id, c.name]);
   if (comps.length < 2) return toast('至少需要两个组件才能声明依赖', 'warn');
   const list = (DB.deps[appId] = DB.deps[appId] || []);
   formModal({
@@ -1383,9 +1447,9 @@ function editDeps(appId) {
     body: `
       <div class="dep-list">
         ${list.length ? list.map(([a, b, label, kind], i) => `<div class="dep-row">
-          <span class="mono dep-n">${esc(a)}</span>
+          <span class="mono dep-n">${esc(compLabel(app, a))}</span>
           <span class="dep-arrow">→</span>
-          <span class="mono dep-n">${esc(b)}</span>
+          <span class="mono dep-n">${esc(compLabel(app, b))}</span>
           <span class="chip">${esc(label || '调用')}</span>
           ${kind === 'async' ? '<span class="badge muted">异步</span>' : ''}
           <button class="mini-act danger" title="删除该依赖" onclick="removeDep('${appId}',${i})">${icon('archive', '', 12)}</button>
@@ -1394,8 +1458,8 @@ function editDeps(appId) {
       <div class="divider"></div>
       <div class="tiny muted" style="margin-bottom:8px">新增一条依赖</div>
       <div class="form-row">
-        ${fField('上游组件', fSelect('from', comps, comps[0]))}
-        ${fField('下游组件', fSelect('to', comps, comps[1]))}
+        ${fField('上游组件', fSelect('from', comps, comps[0][0]))}
+        ${fField('下游组件', fSelect('to', comps, comps[1][0]))}
       </div>
       <div class="form-row">
         ${fField('调用说明', fInput('label', '', '例如：HTTP · 1.2k rps'))}
@@ -1407,7 +1471,7 @@ function editDeps(appId) {
       if (list.some(([a, b]) => a === st.from && b === st.to)) return '这条依赖已存在';
       list.push([st.from, st.to, st.label || '调用', st.async ? 'async' : 'sync']);
       app.updated = nowStamp();
-      app.events.unshift({ t: clockNow(), k: '', tx: `新增依赖 <b>${esc(st.from)} → ${esc(st.to)}</b>` });
+      app.events.unshift({ t: clockNow(), k: '', tx: `新增依赖 <b>${esc(compLabel(app, st.from))} → ${esc(compLabel(app, st.to))}</b>` });
       saveSnapshot();
       route();
       toast('依赖已添加', 'ok');
@@ -1422,7 +1486,7 @@ function removeDep(appId, idx) {
   const app = DB.apps.find(a => a.id === appId);
   if (app) {
     app.updated = nowStamp();
-    app.events.unshift({ t: clockNow(), k: 'warn', tx: `删除依赖 <b>${esc(item[0])} → ${esc(item[1])}</b>` });
+    app.events.unshift({ t: clockNow(), k: 'warn', tx: `删除依赖 <b>${esc(compLabel(app, item[0]))} → ${esc(compLabel(app, item[1]))}</b>` });
   }
   saveSnapshot();
   closeTopModal();
@@ -1523,7 +1587,7 @@ function newAccess(appId) {
         url = `https://${gw.domain}${host || '/' + app.id + '/'}`;
       }
       const port = clampInt(st.port, 1, 65535, 8080);
-      const target = app.components.find(c => c.name === st.comp);
+      const target = findComp(app, st.comp);
       if (!target) return '请选择后端组件';
       const list = DB.access[app.id] || (DB.access[app.id] = []);
       if (list.some(x => x.url === url)) return '该地址已存在，请换一个';
@@ -1680,8 +1744,8 @@ function openAccess(appId, url) {
   const e = (DB.access[appId] || []).find(x => x.url === url);
   if (!app || !e) return;
   const host = e.backend.split(':')[0];
-  const comp = app.components.find(c => c.name === host)
-    || app.components.find(c => c.workloads.some(w => w.name === host));
+  const comp = findComp(app, host)
+    || app.components.find(c => c.workloads.some(w => w.name === host || w.id === host));
   const wls = comp ? comp.workloads : [];
 
   const step = (n, t, d, c) => `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;position:relative">
@@ -1863,11 +1927,17 @@ function openComponentsOf(appId) {
   goto('#/components');
 }
 /* 组件上下游：来自 DB.deps[appId] 的 [上游, 下游, 说明, async?] */
-function compDeps(appId, name) {
+function compDeps(appId, key) {
+  const app = DB.apps.find(a => a.id === appId);
+  const self = findComp(app, key);
+  const selfId = self ? self.id : key;
+  const selfName = self ? self.name : key;
   const list = (DB.deps && DB.deps[appId]) || [];
+  const nameOf = k => compLabel(app, k);
+  const isSelf = k => k === selfId || k === selfName;
   return {
-    up: list.filter(e => e[1] === name).map(e => ({ n: e[0], l: e[2] })),
-    down: list.filter(e => e[0] === name).map(e => ({ n: e[1], l: e[2] }))
+    up: list.filter(e => isSelf(e[1])).map(e => ({ n: nameOf(e[0]), l: e[2] })),
+    down: list.filter(e => isSelf(e[0])).map(e => ({ n: nameOf(e[1]), l: e[2] }))
   };
 }
 function newComponentGlobal() {
@@ -2022,8 +2092,11 @@ function viewWorkloads() {
    工作负载详情：实例 / 指标 / 日志 / 事件 / YAML / 终端
    运行时数据由工作负载字段确定性生成，新建的负载同样有合理数据
    ========================================================== */
-function wlUrl(appId, comp, name) {
-  return `#/workloads/${encodeURIComponent(appId)}/${encodeURIComponent(comp)}/${encodeURIComponent(name)}`;
+function wlUrl(appId, compKey, wlKey) {
+  const app = DB.apps.find(a => a.id === appId);
+  const comp = findComp(app, compKey);
+  const wl = findWl(comp, wlKey);
+  return `#/workloads/${encodeURIComponent(appId)}/${encodeURIComponent(comp ? comp.id : compKey)}/${encodeURIComponent(wl ? wl.id : wlKey)}`;
 }
 function wHash(s) {
   let h = 2166136261;
@@ -2504,8 +2577,8 @@ function termRun(w, raw) {
 /* ---------- 详情页 ---------- */
 function viewWorkloadDetail(appId, compName, wlName) {
   const app = DB.apps.find(a => a.id === appId);
-  const comp = app && app.components.find(c => c.name === compName);
-  const wl = comp && comp.workloads.find(w => w.name === wlName);
+  const comp = app && findComp(app, compName);
+  const wl = comp && findWl(comp, wlName);
   setCrumb(app ? app.name : '工作负载');
 
   if (!wl) {
@@ -2585,8 +2658,8 @@ function wlOpen(appId, comp, name, tab) {
 function curWl() {
   const p = location.hash.replace(/^#/, '').split('/').filter(Boolean);
   const app = DB.apps.find(a => a.id === decodeURIComponent(p[1] || ''));
-  const comp = app && app.components.find(c => c.name === decodeURIComponent(p[2] || ''));
-  return comp && comp.workloads.find(w => w.name === decodeURIComponent(p[3] || ''));
+  const comp = app && findComp(app, decodeURIComponent(p[2] || ''));
+  return comp && findWl(comp, decodeURIComponent(p[3] || ''));
 }
 function wlTabBody(app, comp, wl, pods) {
   if (S.wlTab === 'metrics') return wlMetricsView(wl);
@@ -2853,8 +2926,8 @@ function termSubmit(e) {
 }
 function wlRestart(appId, comp, name) {
   const app = DB.apps.find(a => a.id === appId);
-  const c = app && app.components.find(x => x.name === comp);
-  const w = c && c.workloads.find(x => x.name === name);
+  const c = app && findComp(app, comp);
+  const w = c && findWl(c, name);
   if (!w) return;
   w.restarts = (w.restarts || 0) + 0;
   w.status = '运行中';
@@ -3037,8 +3110,8 @@ function ioVolumeLines(app, comp, w, ind) {
 function ioWl() {
   const p = location.hash.replace(/^#/, '').split('/').filter(Boolean);
   const app = DB.apps.find(a => a.id === decodeURIComponent(p[1] || ''));
-  const comp = app && app.components.find(c => c.name === decodeURIComponent(p[2] || ''));
-  const w = comp && comp.workloads.find(x => x.name === decodeURIComponent(p[3] || ''));
+  const comp = app && findComp(app, decodeURIComponent(p[2] || ''));
+  const w = comp && findWl(comp, decodeURIComponent(p[3] || ''));
   return { app, comp, w };
 }
 function wlIOView(app, comp, wl) {
@@ -3329,7 +3402,7 @@ function storeSet(v) {
 }
 function openWlIO(appId, comp, wl) {
   S.wlPending = 'io';
-  goto(`#/workloads/${appId}/${comp}/${wl}`);
+  goto(wlUrl(appId, comp, wl));
 }
 
 function ensureConfig(app) {
@@ -3349,19 +3422,22 @@ function ensureConfig(app) {
     if (comps.includes('channel-adapter')) seed.push(
       { key: 'PAY_SIGN_KEY', value: 'sk_live_9f3c7a2b', scope: 'channel-adapter', secret: true, note: '渠道签名密钥' }
     );
-    DB.config[app.id] = seed.map((c, i) => Object.assign({ id: `cfg-${app.id}-${i}`, mount: 'env', updated: app.updated || nowStamp() }, c));
+    const idOf = new Map(app.components.map(c => [c.name, c.id]));
+    DB.config[app.id] = seed.map((c, i) => Object.assign(
+      { id: `cfg-${app.id}-${i}`, mount: 'env', updated: app.updated || nowStamp() },
+      c, { scope: c.scope === 'all' ? 'all' : (idOf.get(c.scope) || c.scope) }));
     saveSnapshot();
   }
   return DB.config[app.id];
 }
 /* 某个组件实际生效的配置：全局 + 组件作用域 */
-function configOf(app, compName) {
-  return ensureConfig(app).filter(c => c.scope === 'all' || c.scope === compName);
+function configOf(app, key) {
+  return ensureConfig(app).filter(c => scopeMatches(app, c.scope, key) || c.scope === 'all');
 }
 function cfgFiltered(app) {
   const q = (S.cfgQ || '').trim().toLowerCase();
   return ensureConfig(app).filter(c => {
-    if (S.cfgScope !== 'all-app' && c.scope !== S.cfgScope) return false;
+    if (S.cfgScope !== 'all-app' && !scopeMatches(app, c.scope, S.cfgScope)) return false;
     if (S.cfgType === 'secret' && !c.secret) return false;
     if (S.cfgType === 'plain' && c.secret) return false;
     if (!q) return true;
@@ -3376,7 +3452,7 @@ function ioValPreview(v) {
   return esc(clipped) + (t.includes('\n') || first.length > 46 ? '<span class="muted"> …</span>' : '');
 }
 function cfgUsers(app, scope) {
-  return app.components.filter(c => scope === 'all' || c.name === scope)
+  return app.components.filter(c => scope === 'all' || c.id === scope || c.name === scope)
     .reduce((s, c) => s + c.workloads.length, 0);
 }
 function cfgRows(app) {
@@ -3392,7 +3468,7 @@ function cfgRows(app) {
            <button class="btn sm ghost" style="height:18px;padding:0 5px;margin-left:4px" onclick="cfgReveal('${app.id}','${c.id}')">显示</button>`
         : ioValPreview(c.value)}
     </td>
-    <td>${c.scope === 'all' ? '<span class="chip">全部组件</span>' : `<span class="chip blue">${esc(c.scope)}</span>`}
+    <td>${c.scope === 'all' ? '<span class="chip">全部组件</span>' : `<span class="chip blue">${esc(compLabel(app, c.scope))}</span>`}
       <div class="sub">${cfgUsers(app, c.scope)} 个工作负载</div></td>
     <td>${c.mount === 'file'
       ? `<span class="badge info">文件挂载</span><div class="sub mono">${esc(c.path || '/etc/app/conf')}</div>`
@@ -3419,7 +3495,7 @@ function appConfigView(app) {
       <select class="input" style="width:170px;height:30px;padding:0 8px;font-size:12px" onchange="cfgSet('scope', this.value)">
         <option value="all-app"${S.cfgScope === 'all-app' ? ' selected' : ''}>全部作用域</option>
         <option value="all"${S.cfgScope === 'all' ? ' selected' : ''}>全部组件</option>
-        ${app.components.map(c => `<option value="${esc(c.name)}"${S.cfgScope === c.name ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}
+        ${app.components.map(c => `<option value="${esc(c.id)}"${S.cfgScope === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}
       </select>
       ${[['all', '全部'], ['plain', '明文'], ['secret', '密钥']].map(([k, n]) =>
         `<button class="filter-pill ${S.cfgType === k ? 'on' : ''}" onclick="cfgSet('type','${k}')">${n}</button>`).join('')}
@@ -3471,7 +3547,7 @@ function cfgModal(appId, id) {
   if (!app) return;
   const list = ensureConfig(app);
   const item = id ? list.find(c => c.id === id) : null;
-  const scopes = [['all', '全部组件'], ...app.components.map(c => [c.name, c.name])];
+  const scopes = [['all', '全部组件'], ...app.components.map(c => [c.id, c.name])];
   formModal({
     title: item ? `编辑配置 · ${item.key}` : '新增配置项',
     desc: 'Key 在同一作用域内唯一；密钥类型的值不会明文下发到工作负载。',
@@ -3495,7 +3571,7 @@ function cfgModal(appId, id) {
       }
       if (!String(st.value || '').trim()) return '请填写配置值';
       if (isFile && !String(st.path || '').startsWith('/')) return '挂载目录需以 / 开头';
-      if (list.some(c => c.key === st.key && c.scope === st.scope && c.id !== id)) return `作用域 ${st.scope === 'all' ? '全部组件' : st.scope} 下已存在 ${st.key}`;
+      if (list.some(c => c.key === st.key && c.scope === st.scope && c.id !== id)) return `作用域 ${compLabel(app, st.scope)} 下已存在 ${st.key}`;
       const patch = {
         key: st.key, value: st.value, scope: st.scope, secret: st.secret,
         mount: st.mount, path: isFile ? st.path : '', note: st.note, updated: nowStamp()
@@ -3586,7 +3662,7 @@ function releaseApp(appId, compName) {
   if (!app.components.length) return toast('该应用还没有组件，请先在「组件与工作负载」中创建', 'warn');
   const comps = app.components.map(c => c.name);
   const comp = compName && comps.includes(compName) ? compName : comps[0];
-  const c0 = app.components.find(c => c.name === comp);
+  const c0 = findComp(app, comp);
   const envNames = DB.envs.map(e => e.name);
   formModal({
     title: `发布「${app.name}」`,
@@ -3612,9 +3688,9 @@ function releaseApp(appId, compName) {
     onSubmit: st => {
       if (!st.version) return '请填写发布版本';
       if (st.approval && !st.approver) return '请填写审批人，或关闭「需要人工审批」';
-      const target = app.components.find(c => c.name === st.comp);
+      const target = findComp(app, st.comp);
       if (!target || !target.workloads.length) return `组件「${st.comp}」还没有工作负载，发布不会产生任何变更`;
-      const chosen = app.components.find(c => c.name === st.comp) || c0;
+      const chosen = findComp(app, st.comp) || c0;
       const rec = {
         id: `rel-${Date.now().toString(36)}`,
         appId: app.id, comp: st.comp, version: st.version,
@@ -3645,7 +3721,7 @@ function finishRelease(rec, delay) {
   const done = () => {
     rec.status = '已发布';
     const app = DB.apps.find(a => a.id === rec.appId);
-    const comp = app && app.components.find(c => c.name === rec.comp);
+    const comp = app && findComp(app, rec.comp);
     if (comp) comp.version = rec.version;
     if (app) {
       app.updated = nowStamp();
@@ -3704,7 +3780,7 @@ function rollbackRelease(id) {
     onSubmit: () => {
       if (!rec.prev) return '该记录没有可回滚的历史版本';
       rec.status = '已回滚';
-      const comp = app && app.components.find(c => c.name === rec.comp);
+      const comp = app && findComp(app, rec.comp);
       if (comp) comp.version = rec.prev;
       if (app) {
         app.updated = nowStamp();
@@ -3729,7 +3805,7 @@ function cfgSnapDiff(prev, cur) {
 }
 function componentVersions(appId, compName) {
   const app = DB.apps.find(a => a.id === appId);
-  const comp = app && app.components.find(c => c.name === compName);
+  const comp = app && findComp(app, compName);
   if (!comp) return;
   const list = DB.releases.filter(r => r.appId === appId && r.comp === compName)
     .sort((a, b) => (b.ts || 0) - (a.ts || 0));
@@ -4057,7 +4133,7 @@ function viewPipeline(id, runNo) {
           </dl>
           <div class="divider"></div>
           <div class="tiny muted">制品</div>
-          <div class="mono" style="font-size:10.5px;word-break:break-all;margin-top:3px">hub.corp.io/retail/${esc(p.comp === 'order-service' ? 'order-service' : p.comp)}:${esc((app && app.components.find(c => c.name === p.comp) || {}).version || 'v2.4.1')}</div>
+          <div class="mono" style="font-size:10.5px;word-break:break-all;margin-top:3px">hub.corp.io/retail/${esc(p.comp === 'order-service' ? 'order-service' : p.comp)}:${esc((app && findComp(app, p.comp) || {}).version || 'v2.4.1')}</div>
           <div class="mono" style="font-size:10.5px;color:var(--text-3);margin-top:2px">sha256:${(wHash(p.id + run.no).toString(16) + '9f3c1a7bd2e84560').slice(0, 16)}…</div>
         </div>
       </div>
@@ -4147,7 +4223,7 @@ function promoteCanary(id) {
   p.logs.push([clockNow(), 't', 'canary 50%  deployed  errorRate=0.00%']);
   p.logs.push([clockNow(), 'ok', 'stage canary ✓ 4m12s  权重推进至 100%']);
   const app = DB.apps.find(a => a.id === p.appId);
-  const comp = app && app.components.find(c => c.name === p.comp);
+  const comp = app && findComp(app, p.comp);
   if (app) {
     app.updated = nowStamp();
     app.events.unshift({ t: clockNow(), k: 'ok', tx: `组件 <b>${esc(p.comp)}</b> 完成灰度发布${comp ? `，当前版本 ${esc(comp.version)}` : ''}` });
@@ -4273,7 +4349,7 @@ function newPipeline() {
         render: s => {
           const [appId, comp] = String(s.target).split('|');
           const app = DB.apps.find(a => a.id === appId);
-          const c = app && app.components.find(x => x.name === comp);
+          const c = app && findComp(app, comp);
           return `<div class="kv" style="grid-template-columns:92px 1fr;row-gap:11px">
             <dt>归属</dt><dd><b>${esc(app ? app.name : '')}</b> / <span class="mono">${esc(comp)}</span></dd>
             <dt>代码</dt><dd class="mono" style="font-size:11.5px">${esc(s.repo)}${esc(s.branch)} · ${esc(s.trigger)}</dd>
@@ -4289,7 +4365,7 @@ function newPipeline() {
     onSubmit: s => {
       const [appId, compName] = String(s.target).split('|');
       const app = DB.apps.find(a => a.id === appId);
-      const comp = app && app.components.find(c => c.name === compName);
+      const comp = app && findComp(app, compName);
       if (!comp) return '找不到所选组件';
       const stages = [{ n: '代码检出', s: 'wait', d: '—' }, { n: '编译构建', s: 'wait', d: '—' }];
       if (s.unit) stages.push({ n: '单元测试', s: 'wait', d: '—' });
@@ -6812,7 +6888,7 @@ function runtimeText(comp) {
 }
 function applyRuntimeFromBuild(p) {
   const app = DB.apps.find(a => a.id === p.appId);
-  const comp = app && app.components.find(c => c.name === p.comp);
+  const comp = app && findComp(app, p.comp);
   if (comp && (!comp.runtime || comp.runtime === RUNTIME_PENDING)) comp.runtime = p.buildEnv || '容器镜像';
 }
 const WL_KINDS = [['Deployment', 'Deployment · 无状态服务'], ['StatefulSet', 'StatefulSet · 有状态'], ['CronJob', 'CronJob · 定时任务'], ['EdgeApp', 'EdgeApp · 边缘应用']];
@@ -6838,6 +6914,7 @@ function buildWorkload(src, comp) {
   const where = src.wlWhere || '云端';
   const reps = clampInt(src.wlReplicas, 0, 50, 2);
   return {
+    id: src.wlId || `wl-${slugify(src.wlName) || 'w'}`,
     name: src.wlName,
     kind,
     replicas: kind === 'CronJob' ? 0 : reps,
@@ -7003,6 +7080,7 @@ function makeComponent(src, app) {
   const role = src.role || '核心服务';
   const appId = app ? app.id : 'demo';
   return {
+    id: src.id || `cmp-${slugify(src.name) || 'c'}`,
     name: src.name,
     role,
     runtime: RUNTIME_PENDING,
@@ -7025,7 +7103,7 @@ function makeComponent(src, app) {
 
 function componentConfig(appId, compName) {
   const app = DB.apps.find(a => a.id === appId);
-  const comp = app && app.components.find(c => c.name === compName);
+  const comp = app && findComp(app, compName);
   if (!comp) return;
   formModal({
     title: `组件配置 · ${comp.name}`,
@@ -7034,6 +7112,7 @@ function componentConfig(appId, compName) {
     wide: true,
     body: `
       <div class="form-sec">身份</div>
+      ${fField('组件名称', fInput('name', comp.name, '例如：member-service'), '改名不会影响依赖、配置作用域与访问入口', true)}
       <div class="form-row">
         ${fField('角色', fSelect('role', COMP_ROLES, comp.role), '影响默认协议与组件列表的筛选')}
         ${fField('负责人', fInput('owner', comp.owner || app.owner))}
@@ -7070,7 +7149,32 @@ function componentConfig(appId, compName) {
         if (!String(st[k] || '').startsWith('/')) return `${label}路径需以 / 开头`;
       }
       if (!st.repo) return '请填写代码仓库地址';
+      const nextName = String(st.name || '').trim();
+      if (!nextName) return '请填写组件名称';
+      if (nextName !== comp.name) {
+        if (!NAME_RE.test(nextName)) return '组件名称只能包含小写字母、数字与短横线，并以字母或数字开头';
+        if (app.components.some(c => c !== comp && c.name === nextName)) return `应用内已存在组件「${nextName}」`;
+      }
       const changed = [];
+      if (nextName !== comp.name) {
+        const oldName = comp.name;
+        comp.name = nextName;
+        comp.labels = Object.assign({}, comp.labels, { 'app.kubernetes.io/name': nextName });
+        changed.push('名称');
+        /* 实体引用都按 id 存，这里只需同步充当展示缓存的字段 */
+        (DB.pipelines || []).forEach(p => {
+          if (p.compId === comp.id || (p.appId === app.id && p.comp === oldName)) { p.comp = nextName; p.compId = comp.id; }
+        });
+        (DB.releases || []).forEach(r => {
+          if (r.compId === comp.id || (r.appId === app.id && r.comp === oldName)) { r.comp = nextName; r.compId = comp.id; }
+        });
+        (DB.access[app.id] || []).forEach(x => {
+          const b = String(x.backend || '');
+          if (b.startsWith(oldName + ':')) x.backend = nextName + b.slice(oldName.length);
+        });
+        if (S.appComp === oldName) S.appComp = nextName;
+        if (S.appWl && !findWl(comp, S.appWl)) S.appWl = null;
+      }
       const apply = (k, v, label) => { if (comp[k] !== v) { comp[k] = v; changed.push(label); } };
       apply('role', st.role, '角色');
       apply('owner', st.owner, '负责人');
@@ -7146,7 +7250,7 @@ function newComponent(appId) {
 /* ---------- 新建工作负载 ---------- */
 function newWorkload(appId, compName) {
   const app = DB.apps.find(a => a.id === appId);
-  const comp = app && app.components.find(c => c.name === compName);
+  const comp = app && findComp(app, compName);
   if (!comp) return;
   formModal({
     title: '新建工作负载',
@@ -7192,8 +7296,8 @@ function newWorkload(appId, compName) {
 /* ---------- 删除 ---------- */
 function deleteWorkload(appId, compName, wlName) {
   const app = DB.apps.find(a => a.id === appId);
-  const comp = app && app.components.find(c => c.name === compName);
-  const wl = comp && comp.workloads.find(w => w.name === wlName);
+  const comp = app && findComp(app, compName);
+  const wl = comp && findWl(comp, wlName);
   if (!wl) return;
   formModal({
     title: '删除工作负载？',
@@ -7216,7 +7320,7 @@ function deleteWorkload(appId, compName, wlName) {
 
 function deleteComponent(appId, compName) {
   const app = DB.apps.find(a => a.id === appId);
-  const comp = app && app.components.find(c => c.name === compName);
+  const comp = app && findComp(app, compName);
   if (!comp) return;
   const wlCount = comp.workloads.length;
   const boundPipes = DB.pipelines.filter(p => p.appId === appId && p.comp === compName);
@@ -7234,8 +7338,10 @@ function deleteComponent(appId, compName) {
       DB.pipelines = DB.pipelines.filter(p => !(p.appId === appId && p.comp === compName));
       app.pipelines = app.pipelines.filter(pid => DB.pipelines.some(p => p.id === pid));
       DB.releases = DB.releases.filter(r => !(r.appId === appId && r.comp === compName));
-      if (DB.config[appId]) DB.config[appId] = DB.config[appId].filter(c => c.scope !== compName);
-      if (DB.deps[appId]) DB.deps[appId] = DB.deps[appId].filter(([a, b]) => a !== compName && b !== compName);
+      const gone = findComp(app, compName);
+      const goneKeys = new Set([compName, gone && gone.id].filter(Boolean));
+      if (DB.config[appId]) DB.config[appId] = DB.config[appId].filter(c => !goneKeys.has(c.scope));
+      if (DB.deps[appId]) DB.deps[appId] = DB.deps[appId].filter(([a, b]) => !goneKeys.has(a) && !goneKeys.has(b));
       app.updated = nowStamp();
       app.events.unshift({ t: clockNow(), k: 'warn', tx: `组件 <b>${esc(compName)}</b> 及其 ${wlCount} 个工作负载已删除` });
       saveSnapshot();
@@ -7397,6 +7503,7 @@ function route() {
 
 /* ---------------- 启动 ---------------- */
 normalizeModel();
+migrateRefs();
 normalizeIO();
 normalizeEdge();
 normalizeClusters();
