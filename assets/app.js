@@ -403,7 +403,6 @@ const NAV = [
   {
     label: '平台管理', items: [
       { label: '模块管理', icon: 'puzzle', route: '/admin/modules' },
-      { label: '环境管理', icon: 'layers', route: '/admin/envs' },
       { label: '角色权限', icon: 'users', route: '/admin/rbac' },
       { label: '设计说明', icon: 'doc', route: '/design' }
     ]
@@ -454,12 +453,9 @@ function renderSidebar() {
 }
 
 function renderTopbar() {
-  const envMap = { prod: '生产', staging: '预发', dev: '测试' };
+  /* 单环境部署：不提供环境切换 */
   $('#topbar').innerHTML = `
     <div class="crumb">控制台<span class="sep">/</span><b id="crumbCur">概览</b></div>
-    <div class="seg" id="envSeg">
-      ${Object.entries(envMap).map(([k, v]) => `<button class="${S.env === k ? 'on' : ''}" data-env="${k}">${v}</button>`).join('')}
-    </div>
     <div class="search gsearch">
       ${icon('search', '', 14)}
       <input id="gsearch" placeholder="搜索应用 / 组件 / 工作负载" autocomplete="off"
@@ -470,15 +466,6 @@ function renderTopbar() {
     <button class="icon-btn" title="帮助">${icon('help', '', 16)}</button>
     <button class="icon-btn" title="告警" onclick="location.hash='/ops/alerts'">${icon('bell', '', 16)}<span class="dot-red"></span></button>
     <div class="avatar" title="${DB.user.name} · ${DB.user.role}">${DB.user.avatar}</div>`;
-
-  $('#envSeg').querySelectorAll('button').forEach(b => {
-    b.onclick = () => {
-      S.env = b.dataset.env;
-      localStorage.setItem(LS_ENV, S.env);
-      renderTopbar(); route();
-      toast(`已切换到${b.textContent}环境`);
-    };
-  });
 }
 function setCrumb(t) { const e = $('#crumbCur'); if (e) e.textContent = t; }
 
@@ -786,7 +773,7 @@ function viewOverview() {
   <div class="page-head">
     <div>
       <div class="ttl">概览</div>
-      <div class="sub">当前环境 <b>${env.name}</b> · 集群 <span class="mono">${env.cluster}</span> · 数据更新于 1 分钟前</div>
+      <div class="sub">集群 <span class="mono">${env.cluster}</span> · 单环境部署 · 数据更新于 1 分钟前</div>
     </div>
     <div class="acts">
       <button class="btn" onclick="toast('已刷新')">${icon('refresh', '', 14)}刷新</button>
@@ -1089,7 +1076,7 @@ function viewAppDetail(id) {
       <div><div class="tiny muted">组件</div><div style="font-weight:600;margin-top:2px">${app.components.length}</div></div>
       <div><div class="tiny muted">工作负载</div><div style="font-weight:600;margin-top:2px">${wlCount}</div></div>
       <div><div class="tiny muted">健康度</div><div style="font-weight:600;margin-top:2px;color:${healthText(app).color}">${healthText(app).v === '—' ? '—' : healthText(app).v + '%'}</div></div>
-      <div><div class="tiny muted">部署环境</div><div style="margin-top:2px;display:flex;gap:5px">${app.envs.map(e => `<span class="chip">${e}</span>`).join('')}</div></div>
+      <div><div class="tiny muted">运行集群</div><div class="mono" style="margin-top:2px;font-size:11.5px">${esc((curEnv() && curEnv().cluster) || '—')}</div></div>
       <div style="margin-left:auto"><div class="tiny muted">最近更新</div><div class="mono" style="margin-top:2px;font-size:11.5px">${app.updated}</div></div>
     </div>
     <div class="tabs" style="padding:0 14px">
@@ -3719,7 +3706,7 @@ function releaseApp(appId, compName) {
         ${fField('版本', fInput('version', c0 ? c0.version : 'v1.0.0'), '默认取组件当前版本')}
         ${fField('发布策略', fSelect('strategy', ['滚动更新', '灰度 10% → 50% → 100%', '蓝绿切换'], '灰度 10% → 50% → 100%'))}
       </div>
-      ${fCheck('approval', '需要人工审批', true, '生产环境建议开启；预发/测试环境可关闭后直接发布', 'approvalBox')}
+      ${fCheck('approval', '需要人工审批', true, '单环境部署：生产发布一律需审批，P0 应用需两人', 'approvalBox')}
       <div class="float-fields" id="approvalBox">
         ${fField('审批人', fInput('approver', app.owner || DB.user.name), '默认应用负责人')}
       </div>
@@ -4349,7 +4336,7 @@ function newPipeline() {
       branch: 'main', trigger: 'Git Push', repo: 'ssh://git.corp.io/retail/',
       buildEnv: 'JDK 21 · Maven 3.9', dockerfile: 'Dockerfile',
       unit: true, regress: true, approval: true, autoRollback: true,
-      env: '预发环境', strategy: '灰度发布（10% → 50% → 100%）'
+      env: '生产环境', strategy: '灰度发布（10% → 50% → 100%）'
     },
     steps: [
       {
@@ -4373,7 +4360,7 @@ function newPipeline() {
           <div class="divider"></div>
           <div class="tiny muted" style="margin-bottom:8px">可选阶段（代码检出、编译构建、镜像推送始终执行）</div>
           ${fCheck('unit', '单元测试', s.unit, '生成覆盖率报告，低于 70% 阻断')}
-          ${fCheck('regress', '自动化回归', s.regress, '部署预发后跑 250 条核心用例')}
+          ${fCheck('regress', '自动化回归', s.regress, '灰度阶段跑 250 条核心用例')}
           ${fCheck('approval', '人工审批', s.approval, '进入生产前需要应用负责人放行')}`,
       },
       {
@@ -6768,33 +6755,6 @@ function moduleCard(m) {
 }
 
 /* ---------- 环境 / 权限 ---------- */
-function viewEnvs() {
-  setCrumb('环境管理');
-  return `
-  <div class="page-head">
-    <div><div class="ttl">环境管理</div><div class="sub">环境绑定集群与配额，定义应用在环境间的提升策略。</div></div>
-    <div class="acts"><button class="btn primary" onclick="newEnv()">${icon('plus', '', 14)}新建环境</button></div>
-  </div>
-  <div class="grid g3">
-    ${DB.envs.map(e => `
-      <div class="card">
-        <div class="card-body">
-          <div class="spread"><div style="font-size:13.5px;font-weight:650">${e.name}</div>${badge(e.status)}</div>
-          <div class="tiny mono muted" style="margin-top:2px">${e.code}</div>
-          <div class="divider"></div>
-          <dl class="kv" style="grid-template-columns:66px 1fr">
-            <dt>集群</dt><dd class="mono" style="font-size:11px">${e.cluster}</dd>
-            <dt>区域</dt><dd>${e.region}</dd>
-            <dt>应用</dt><dd>${e.apps} 个</dd>
-            <dt>工作负载</dt><dd>${e.workloads} 个</dd>
-            <dt>策略</dt><dd>${e.guard}</dd>
-          </dl>
-          <div class="tiny muted" style="margin-top:10px;padding-top:9px;border-top:1px solid var(--border)">${e.note}</div>
-        </div>
-      </div>`).join('')}
-  </div>`;
-}
-
 function viewRbac() {
   setCrumb('角色权限');
   return `
@@ -7053,7 +7013,7 @@ function newApp() {
           </div>
           <div class="form-row">
             ${fField('优先级', fSelect('level', ['P0', 'P1', 'P2'], s.level), 'P0 变更需额外审批')}
-            ${fField('部署环境', fSelect('env', ['生产环境', '预发环境', '测试环境'], s.env))}
+            ${fField('部署环境', fReadonly(s.env), '单环境部署：应用直接发布到生产集群')}
           </div>
           ${fField('应用说明', `<textarea class="input" data-k="desc" rows="2" placeholder="一句话说明这个应用承载的业务" style="height:auto;padding:8px 10px;resize:vertical">${esc(s.desc || '')}</textarea>`)}`,
         validate: s => {
@@ -7585,7 +7545,6 @@ function route() {
   else if (seg[0] === 'ops' && seg[1] === 'alerts') html = viewAlerts();
   else if (seg[0] === 'ops') html = viewClusters();
   else if (seg[0] === 'admin' && seg[1] === 'modules') html = viewModules();
-  else if (seg[0] === 'admin' && seg[1] === 'envs') html = viewEnvs();
   else if (seg[0] === 'admin' && seg[1] === 'rbac') html = viewRbac();
   else if (seg[0] === 'design') html = viewDesign();
   else html = viewOverview();

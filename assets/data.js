@@ -9,8 +9,6 @@ window.DB = {
 
   envs: [
     { name: '生产环境', code: 'prod', cluster: 'prod-shanghai-01', region: '华东 · 上海', status: '健康', workloads: 24, apps: 7, guard: '严格模式', note: '变更需审批 + 灰度' },
-    { name: '预发环境', code: 'staging', cluster: 'staging-shanghai-01', region: '华东 · 上海', status: '健康', workloads: 18, apps: 5, guard: '标准模式', note: '自动发布，允许热更新' },
-    { name: '测试环境', code: 'dev', cluster: 'dev-beijing-01', region: '华北 · 北京', status: '维护中', workloads: 12, apps: 4, guard: '宽松模式', note: '每日 02:00 自动回收' }
   ],
 
   /* ---------------- 应用 - 组件 - 工作负载 ---------------- */
@@ -25,7 +23,7 @@ window.DB = {
       health: 99.2,
       desc: '面向门店与线上渠道的统一交易中台，承载下单、库存、履约核心链路。',
       updated: '2026-10-29 11:42',
-      envs: ['生产环境', '预发环境'],
+      envs: ['生产环境'],
       components: [
         {
           name: 'order-service',
@@ -130,7 +128,7 @@ window.DB = {
       health: 94.1,
       desc: '统一支付路由与对账，接入 12 家渠道，含熔断与幂等保障。',
       updated: '2026-10-29 13:28',
-      envs: ['生产环境', '预发环境'],
+      envs: ['生产环境'],
       components: [
         {
           name: 'pay-router',
@@ -219,7 +217,7 @@ window.DB = {
       health: 99.8,
       desc: '统一账号、身份认证与用户画像基础服务。',
       updated: '2026-10-28 16:20',
-      envs: ['生产环境', '预发环境', '测试环境'],
+      envs: ['生产环境'],
       components: [
         {
           name: 'auth-service',
@@ -291,7 +289,7 @@ window.DB = {
       health: 0,
       desc: '大促规则编排与优惠券发放，活动期弹性伸缩。',
       updated: '2026-10-20 14:00',
-      envs: ['测试环境'],
+      envs: ['生产环境'],
       components: [
         {
           name: 'rule-engine',
@@ -300,7 +298,7 @@ window.DB = {
           image: 'hub.corp.io/mkt/rule-engine',
           version: 'v2.0.0',
           workloads: [
-            { name: 'rule-engine', kind: 'Deployment', ready: '0/0', image: 'v2.0.0', cpu: '0 / 4c', mem: '0 / 4Gi', status: '已停止', where: '云端', cluster: 'dev-beijing-01', mesh: '—', restarts: 0, age: '9d' }
+            { name: 'rule-engine', kind: 'Deployment', ready: '0/0', image: 'v2.0.0', cpu: '0 / 4c', mem: '0 / 4Gi', status: '已停止', where: '云端', cluster: 'prod-shanghai-01', mesh: '—', restarts: 0, age: '9d' }
           ]
         }
       ],
@@ -314,16 +312,16 @@ window.DB = {
     {
       id: 'pl-order', name: 'order-service · 主干发布', app: '智慧零售中台', appId: 'retail-platform',
       comp: 'order-service', trigger: 'Git Push', branch: 'main', status: '运行中',
-      last: '3 分钟前', success: 96.4, runs: 218, env: '预发环境',
+      last: '3 分钟前', success: 96.4, runs: 218, env: '生产环境',
       stages: [
         { n: '代码检出', s: 'done', d: '12s' },
         { n: '编译构建', s: 'done', d: '1m48s' },
         { n: '单元测试', s: 'done', d: '56s' },
         { n: '镜像推送', s: 'done', d: '24s' },
-        { n: '部署预发', s: 'done', d: '38s' },
+        { n: '灰度部署', s: 'done', d: '38s' },
         { n: '自动化回归', s: 'done', d: '2m12s' },
         { n: '人工审批', s: 'wait', d: '—' },
-        { n: '灰度发布', s: 'wait', d: '—' }
+        { n: '全量发布', s: 'wait', d: '—' }
       ],
       logs: [
         ['14:36:02', 'k', '#8 order-service  pipeline start  trigger=git-push  branch=main'],
@@ -337,8 +335,8 @@ window.DB = {
         ['14:39:04', 'ok', 'stage test ✓ 56s  312 passed, 0 failed, coverage 78.2%'],
         ['14:39:06', 'k', 'stage: push  →  hub.corp.io/retail/order-service:2.4.1'],
         ['14:39:30', 'ok', 'stage push ✓ 24s  digest=sha256:a91f...'],
-        ['14:39:32', 'k', 'stage: deploy-staging  →  namespace retail-staging'],
-        ['14:40:10', 'ok', 'stage deploy-staging ✓ 38s  ready 4/4'],
+        ['14:39:32', 'k', 'stage: deploy-canary  →  namespace retail-prod'],
+        ['14:40:10', 'ok', 'stage deploy-canary ✓ 38s  ready 4/4'],
         ['14:40:12', 'k', 'stage: regression  →  运行接口回归套件'],
         ['14:40:31', 'warn', 'regression: 2 个用例慢查询 (>800ms)，继续执行']
       ],
@@ -359,10 +357,10 @@ window.DB = {
         { n: '编译构建', s: 'done', d: '52s' },
         { n: '单元测试', s: 'done', d: '31s' },
         { n: '镜像推送', s: 'done', d: '18s' },
-        { n: '部署预发', s: 'done', d: '26s' },
+        { n: '灰度部署', s: 'done', d: '26s' },
         { n: '自动化回归', s: 'done', d: '3m05s' },
         { n: '人工审批', s: 'done', d: '4m20s' },
-        { n: '灰度发布', s: 'done', d: '5m00s' }
+        { n: '全量发布', s: 'done', d: '5m00s' }
       ],
       logs: [
         ['11:20:00', 'k', '#402 inventory-service pipeline start'],
@@ -384,10 +382,10 @@ window.DB = {
         { n: '编译构建', s: 'done', d: '2m10s' },
         { n: '单元测试', s: 'fail', d: '1m02s' },
         { n: '镜像推送', s: 'wait', d: '—' },
-        { n: '部署预发', s: 'wait', d: '—' },
+        { n: '灰度部署', s: 'wait', d: '—' },
         { n: '自动化回归', s: 'wait', d: '—' },
         { n: '人工审批', s: 'wait', d: '—' },
-        { n: '灰度发布', s: 'wait', d: '—' }
+        { n: '全量发布', s: 'wait', d: '—' }
       ],
       logs: [
         ['13:20:04', 'k', '#156 pay-router pipeline start'],
@@ -438,10 +436,10 @@ window.DB = {
         { n: '编译构建', s: 'done', d: '2m22s' },
         { n: '单元测试', s: 'done', d: '1m40s' },
         { n: '镜像推送', s: 'done', d: '30s' },
-        { n: '部署预发', s: 'done', d: '44s' },
+        { n: '灰度部署', s: 'done', d: '44s' },
         { n: '自动化回归', s: 'done', d: '4m10s' },
         { n: '人工审批', s: 'done', d: '12m00s' },
-        { n: '灰度发布', s: 'done', d: '8m00s' }
+        { n: '全量发布', s: 'done', d: '8m00s' }
       ],
       logs: [['08:00:00', 'k', '#331 order-core pipeline start'], ['08:29:36', 'ok', 'pipeline success']],
       history: [
@@ -458,10 +456,10 @@ window.DB = {
         { n: '编译构建', s: 'done', d: '1m30s' },
         { n: '单元测试', s: 'done', d: '48s' },
         { n: '镜像推送', s: 'done', d: '15s' },
-        { n: '部署预发', s: 'done', d: '22s' },
+        { n: '灰度部署', s: 'done', d: '22s' },
         { n: '自动化回归', s: 'done', d: '2m30s' },
         { n: '人工审批', s: 'done', d: '3m00s' },
-        { n: '灰度发布', s: 'done', d: '4m00s' }
+        { n: '全量发布', s: 'done', d: '4m00s' }
       ],
       logs: [['16:20:00', 'k', '#512 auth-service pipeline start'], ['16:32:15', 'ok', 'pipeline success']],
       history: [
@@ -747,8 +745,6 @@ window.DB = {
   /* ---------------- 运维 ---------------- */
   clusters: [
     { name: 'prod-shanghai-01', type: '云端 K8s', region: '华东 · 上海', ver: 'v1.29.4', nodes: 12, cpu: 62, mem: 71, pods: 386, status: '健康' },
-    { name: 'staging-shanghai-01', type: '云端 K8s', region: '华东 · 上海', ver: 'v1.29.4', nodes: 4, cpu: 28, mem: 35, pods: 112, status: '健康' },
-    { name: 'dev-beijing-01', type: '云端 K8s', region: '华北 · 北京', ver: 'v1.28.9', nodes: 3, cpu: 15, mem: 22, pods: 48, status: '维护中' },
     { name: 'edge-sh-store', type: '边缘集群', region: '华东 · 门店', ver: 'v1.28.6 · K3s', nodes: 12, cpu: 46, mem: 58, pods: 96, status: '健康' },
     { name: 'edge-cd-store', type: '边缘集群', region: '西南 · 门店', ver: 'v1.28.6 · K3s', nodes: 3, cpu: 0, mem: 0, pods: 0, status: '离线' }
   ],
@@ -765,7 +761,7 @@ window.DB = {
   roles: [
     { name: '平台管理员', users: 3, scope: '全部环境 / 全部应用', perm: '读写 + 模块开关 + 授权', builtin: true },
     { name: '应用负责人', users: 12, scope: '所属应用 / 生产环境', perm: '读写（不可改模块配置）', builtin: false },
-    { name: '开发者', users: 46, scope: '所属应用 / 测试 + 预发', perm: '读写（生产只读）', builtin: false },
+    { name: '开发者', users: 46, scope: '所属应用', perm: '读写（不可发布生产）', builtin: false },
     { name: '运维值班', users: 8, scope: '全部环境', perm: '发布 + 扩缩容 + 重启', builtin: false },
     { name: '只读审计', users: 5, scope: '全部环境', perm: '只读', builtin: false }
   ],
@@ -796,7 +792,7 @@ window.DB = {
       { env: '生产环境', type: '域名', url: 'https://retail.corp.io', backend: 'api-gateway:80', scope: '公网', tls: '已签发 · 82 天', auth: 'OAuth2 登录', status: '已生效', hits: '128.4k / 日', note: '主入口，前置 WAF + CDN' },
       { env: '生产环境', type: '网关路径', url: 'https://apps.corp.io/retail-platform/', backend: 'api-gateway:80', scope: '内网', tls: '平台泛域名', auth: '无', status: '已生效', hits: '12.1k / 日', note: '内部系统联调共用' },
       { env: '生产环境', type: '网关路径', url: 'https://apps.corp.io/retail-platform/edge', backend: 'stock-collector:9100', scope: '内网', tls: '平台泛域名', auth: 'API Key', status: '已生效', hits: '860 / 日', note: '边缘回传上报专用' },
-      { env: '预发环境', type: '域名', url: 'https://retail-staging.corp.io', backend: 'api-gateway:80', scope: '内网', tls: '已签发 · 21 天', auth: 'Basic Auth', status: '已生效', hits: '1.2k / 日', note: '仅研发与测试网段' }
+      { env: '生产环境', type: '域名', url: 'https://retail-internal.corp.io', backend: 'api-gateway:80', scope: '内网', tls: '已签发 · 21 天', auth: 'Basic Auth', status: '已生效', hits: '1.2k / 日', note: '仅内网访问，未公网暴露' }
     ],
     'order-center': [
       { env: '生产环境', type: '域名', url: 'https://order.corp.io', backend: 'order-core-api:8080', scope: '公网', tls: '已签发 · 64 天', auth: 'OAuth2 登录', status: '已生效', hits: '46.2k / 日', note: '订单 H5 与小程序回调' },
@@ -805,7 +801,7 @@ window.DB = {
     'payment-gateway': [
       { env: '生产环境', type: '域名', url: 'https://pay.corp.io', backend: 'pay-router:8443', scope: '内网', tls: '已签发 · 47 天', auth: 'mTLS 双向认证', status: '已生效', hits: '32.8k / 日', note: '仅允许业务网关网段访问' },
       { env: '生产环境', type: '网关路径', url: 'https://apps.corp.io/pay/', backend: 'pay-router:8443', scope: '内网', tls: '平台泛域名', auth: 'mTLS 双向认证', status: '已生效', hits: '5.1k / 日' },
-      { env: '预发环境', type: '域名', url: 'https://pay-staging.corp.io', backend: 'pay-router:8443', scope: '内网', tls: '自签证书', auth: 'mTLS 双向认证', status: '已生效', hits: '220 / 日' }
+      { env: '生产环境', type: '域名', url: 'https://pay-internal.corp.io', backend: 'pay-router:8443', scope: '内网', tls: '自签证书', auth: 'mTLS 双向认证', status: '已生效', hits: '220 / 日' }
     ],
     'edge-video-ai': [
       { env: '生产环境', type: '域名', url: 'https://ai-store.corp.io', backend: 'video-ingest:9000', scope: '公网', tls: '已签发 · 71 天', auth: 'API Key', status: '已生效', hits: '18.6k / 日', note: '门店摄像头推流鉴权' },
@@ -820,7 +816,7 @@ window.DB = {
       { env: '生产环境', type: '网关路径', url: 'https://apps.corp.io/iot/', backend: 'mqtt-broker:8083', scope: '内网', tls: '平台泛域名', auth: 'API Key', status: '已生效', hits: '1.6k / 日' }
     ],
     'promo-engine': [
-      { env: '测试环境', type: '网关路径', url: 'https://apps.corp.io/promo/', backend: 'rule-engine:8080', scope: '内网', tls: '平台泛域名', auth: '无', status: '已停用', hits: '—', note: '应用已停止，入口同步下线' }
+      { env: '生产环境', type: '网关路径', url: 'https://apps.corp.io/promo/', backend: 'rule-engine:8080', scope: '内网', tls: '平台泛域名', auth: '无', status: '已停用', hits: '—', note: '应用已停止，入口同步下线' }
     ]
   },
 
