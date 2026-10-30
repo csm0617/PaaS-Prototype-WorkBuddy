@@ -3480,6 +3480,22 @@ function ioValPreview(v) {
   const clipped = first.length > 46 ? first.slice(0, 46) : first;
   return esc(clipped) + (t.includes('\n') || first.length > 46 ? '<span class="muted"> …</span>' : '');
 }
+/* 一条配置实际被哪些工作负载使用：作用域匹配、且未被同名自有变量覆盖 */
+function cfgRefs(app, c) {
+  const empty = { effective: [], overridden: [] };
+  if (!c) return empty;
+  const comps = app.components.filter(x => c.scope === 'all' || x.id === c.scope || x.name === c.scope);
+  const effective = [], overridden = [];
+  comps.forEach(x => x.workloads.forEach(w => {
+    const own = c.mount !== 'file' && (w.env || []).some(e => e.key === c.key);
+    (own ? overridden : effective).push({ comp: x, wl: w });
+  }));
+  return { effective, overridden };
+}
+function cfgRefText(app, c) {
+  const r = cfgRefs(app, c);
+  return `${r.effective.length} 个工作负载` + (r.overridden.length ? ` · ${r.overridden.length} 个被覆盖` : '');
+}
 function cfgUsers(app, scope) {
   return app.components.filter(c => scope === 'all' || c.id === scope || c.name === scope)
     .reduce((s, c) => s + c.workloads.length, 0);
@@ -3498,7 +3514,7 @@ function cfgRows(app) {
         : ioValPreview(c.value)}
     </td>
     <td>${c.scope === 'all' ? '<span class="chip">全部组件</span>' : `<span class="chip blue">${esc(compLabel(app, c.scope))}</span>`}
-      <div class="sub">${cfgUsers(app, c.scope)} 个工作负载</div></td>
+      <div class="sub">${cfgRefText(app, c)}</div></td>
     <td>${c.mount === 'file'
       ? `<span class="badge info">文件挂载</span><div class="sub mono">${esc(c.path || '/etc/app/conf')}</div>`
       : `<span class="badge outline">环境变量</span>`}</td>
@@ -3582,6 +3598,17 @@ function cfgModal(appId, id) {
     desc: 'Key 在同一作用域内唯一；密钥类型的值不会明文下发到工作负载。',
     okText: item ? '保存' : '新增',
     body: `
+      ${item ? (() => {
+        const r = cfgRefs(app, item);
+        if (!r.effective.length && !r.overridden.length) return '';
+        return `<div class="warn-box" style="margin-bottom:11px">
+          <b>修改影响面</b>：当前有 <b>${r.effective.length}</b> 个工作负载使用该配置${r.overridden.length ? `，另有 ${r.overridden.length} 个被同名变量覆盖、不受影响` : ''}。
+          ${r.effective.length ? `<div class="mono" style="font-size:11px;margin-top:5px;color:var(--text-2)">${r.effective.slice(0, 4).map(x => esc(x.wl.name)).join('、')}${r.effective.length > 4 ? ' 等' : ''}</div>` : ''}
+          <div class="tiny muted" style="margin-top:5px">${(item.mount || 'env') === 'file'
+            ? '文件挂载方式：保存后约 1 分钟内自动同步到容器，无需重启。'
+            : '环境变量方式：保存后需要重启工作负载才会生效。'}</div>
+        </div>`;
+      })() : ''}
       ${fField('Key', fInput('key', item ? item.key : '', 'ORDER_TIMEOUT_MS'), '环境变量：大写字母、数字与下划线；文件挂载：文件名如 application.yaml', true)}
       ${fField('值', fArea('value', item ? item.value : '', item && item.secret ? '密钥值' : '配置值，支持多行'), '按原样写入；文件挂载时即文件内容')}
       <div class="form-row">
@@ -3622,19 +3649,29 @@ function cfgDelete(appId, id) {
   const app = DB.apps.find(a => a.id === appId);
   const item = app && ensureConfig(app).find(c => c.id === id);
   if (!item) return;
-  openModal({
+  const refs = cfgRefs(app, item).effective;
+  formModal({
     title: '删除配置项',
-    desc: `${item.key} · 作用域 ${item.scope === 'all' ? '全部组件' : item.scope}`,
+    desc: `${item.key} · 作用域 ${compLabel(app, item.scope)}`,
     danger: true,
     okText: '确认删除',
-    body: `<p style="margin:0;font-size:12.5px;color:var(--text-2)">删除后，引用该配置的工作负载下次发布时将不再注入此环境变量。</p>`,
-    onOk: () => {
+    body: refs.length
+      ? `<div class="danger-box">
+          仍有 <b>${refs.length}</b> 个工作负载在使用该配置：
+          <div class="mono" style="font-size:11px;margin-top:5px">${refs.slice(0, 4).map(r => esc(r.wl.name)).join('、')}${refs.length > 4 ? ' 等' : ''}</div>
+          <div style="margin-top:6px">按规则 R-06，应先把这些工作负载改绑到别的配置，或调整作用域。</div>
+        </div>
+        ${fCheck('force', '我知道删除后这些工作负载将缺少该配置项，强制删除', false)}`
+      : `<p style="margin:0;font-size:12.5px;color:var(--text-2)">当前没有工作负载引用该配置，可以安全删除。</p>`,
+    onSubmit: st => {
+      if (refs.length && !st.force) return `仍有 ${refs.length} 个工作负载引用该配置，请先解绑或勾选强制删除`;
       DB.config[appId] = ensureConfig(app).filter(c => c.id !== id);
       app.updated = nowStamp();
-      app.events.unshift({ t: clockNow(), k: 'warn', tx: `配置 <b>${esc(item.key)}</b> 已删除` });
+      app.events.unshift({ t: clockNow(), k: 'warn', tx: `配置 <b>${esc(item.key)}</b> 已删除${refs.length ? `（强制，影响 ${refs.length} 个工作负载）` : ''}` });
       saveSnapshot();
       route();
       toast('配置已删除', 'ok');
+      return null;
     }
   });
 }
