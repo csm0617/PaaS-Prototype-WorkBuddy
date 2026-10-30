@@ -6,6 +6,7 @@
 const DB = window.DB;
 DB.releases = DB.releases || [];
 DB.config = DB.config || {};
+DB.moduleCfg = DB.moduleCfg || {};   // 注册表里的每个实体都应有初值，快照才是完整镜像
 const LS_KEY = 'paas.prototype.modules.v1';
 const LS_ENV = 'paas.prototype.env.v1';
 const LS_DB = 'paas.prototype.db.v1';
@@ -49,38 +50,61 @@ const S = {
 
 /* ---------------- 演示数据快照 ----------------
    原型里的新建/删除/扩缩容会写入 localStorage，刷新后依然保留；
-   需要回到初始演示数据时，可在「设计说明」页重置。 */
+   需要回到初始演示数据时，可在「设计说明」页重置。
+
+   持久化由 PERSIST 注册表驱动：新增实体只需在表里加一行，
+   save / load 自动同步，不必在两处手写字段白名单。
+   —— 依赖边（deps）此前就因漏登记而不被保存，刷新即丢。 */
+const SCHEMA_V = 2;
+
+const PERSIST = [
+  { key: 'apps' },
+  { key: 'access' },
+  { key: 'pipelines' },
+  { key: 'releases' },
+  { key: 'config' },
+  { key: 'deps' },                    // 组件依赖边：可编辑，必须落盘
+  { key: 'clusters' },
+  { key: 'envs' },
+  { key: 'roles' },
+  { key: 'moduleCfg' },
+  { key: 'meshRules', path: ['mesh', 'rules'] },
+  { key: 'edgeNodes', path: ['edge', 'nodes'] },
+  { key: 'edgeDist', path: ['edge', 'dist'] },
+  { key: 'edgeDevices', path: ['edge', 'devices'] }
+];
+function entryPath(e) { return e.path || [e.key]; }
+function snapGet(path) { return path.reduce((o, k) => (o == null ? o : o[k]), DB); }
+function snapSet(path, val) {
+  let o = DB;
+  for (let i = 0; i < path.length - 1; i++) {
+    if (!o[path[i]]) o[path[i]] = {};
+    o = o[path[i]];
+  }
+  o[path[path.length - 1]] = val;
+}
+
 function loadSnapshot() {
   try {
     const raw = localStorage.getItem(LS_DB);
     if (!raw) return;
     const d = JSON.parse(raw);
-    if (d && d.v === 1) {
-      if (Array.isArray(d.apps)) DB.apps = d.apps;
-      if (d.access && typeof d.access === 'object') DB.access = d.access;
-      if (Array.isArray(d.pipelines)) DB.pipelines = d.pipelines;
-      if (Array.isArray(d.releases)) DB.releases = d.releases;
-      if (d.config && typeof d.config === 'object') DB.config = d.config;
-      if (Array.isArray(d.meshRules)) DB.mesh.rules = d.meshRules;
-      if (Array.isArray(d.edgeNodes)) DB.edge.nodes = d.edgeNodes;
-      if (Array.isArray(d.edgeDist)) DB.edge.dist = d.edgeDist;
-      if (Array.isArray(d.clusters)) DB.clusters = d.clusters;
-      if (Array.isArray(d.envs)) DB.envs = d.envs;
-      if (Array.isArray(d.roles)) DB.roles = d.roles;
-      if (Array.isArray(d.edgeDevices)) DB.edge.devices = d.edgeDevices;
-      if (d.moduleCfg && typeof d.moduleCfg === 'object') DB.moduleCfg = d.moduleCfg;
-    }
+    if (!d || typeof d !== 'object' || (d.v !== 1 && d.v !== SCHEMA_V)) return;
+    PERSIST.forEach(e => {
+      const v = d[e.key];
+      if (v === undefined || v === null) return;
+      const path = entryPath(e);
+      const wantArr = Array.isArray(snapGet(path));
+      const okShape = wantArr ? Array.isArray(v) : (typeof v === 'object' && !Array.isArray(v));
+      if (okShape) snapSet(path, v);
+    });
   } catch (e) { /* 快照损坏时退回 data.js 初始数据 */ }
 }
 function saveSnapshot() {
   try {
-    localStorage.setItem(LS_DB, JSON.stringify({
-      v: 1, apps: DB.apps, access: DB.access,
-      pipelines: DB.pipelines, releases: DB.releases, config: DB.config,
-      meshRules: DB.mesh.rules, edgeNodes: DB.edge.nodes, edgeDist: DB.edge.dist,
-      clusters: DB.clusters, envs: DB.envs, roles: DB.roles,
-      edgeDevices: DB.edge.devices, moduleCfg: DB.moduleCfg
-    }));
+    const out = { v: SCHEMA_V };
+    PERSIST.forEach(e => { out[e.key] = snapGet(entryPath(e)); });
+    localStorage.setItem(LS_DB, JSON.stringify(out));
   } catch (e) { /* 存储不可用时降级为纯内存态 */ }
 }
 function resetSnapshot() {
@@ -89,11 +113,17 @@ function resetSnapshot() {
 }
 loadSnapshot();
 
+/* 标签：三层实体通用的扩展位。批量操作、策略绑定、成本归集都挂在这里，
+   避免每来一个需求就往 schema 上加一个特设字段。 */
+const SCHED_CODE = { '云端': 'cloud', '边缘': 'edge', '端侧': 'device' };
+
 /* ---------------- 模型归一化 ----------------
    replicas / readyN 是结构化字段，ready 字符串只作展示；
    历史快照与应用市场数据没有这些字段时在此补齐。 */
 function normalizeModel() {
   DB.apps.forEach(a => {
+    if (!a.labels) a.labels = { 'platform.io/app': a.id, 'platform.io/level': a.level, 'platform.io/domain': a.domain };
+    if (!a.annotations) a.annotations = {};
     a.components.forEach(c => {
       if (!c.serviceName) c.serviceName = c.name;
       if (!c.port) c.port = 8080;
@@ -105,11 +135,19 @@ function normalizeModel() {
       if (!c.protocol) c.protocol = protoOf(c.role);
       if (!c.buildMode) c.buildMode = 'Dockerfile 构建';
       if (!c.createdAt) c.createdAt = a.updated || nowStamp();
+      if (!c.labels) c.labels = { 'app.kubernetes.io/name': c.name, 'platform.io/service': c.serviceName, 'platform.io/role': c.role };
+      if (!c.annotations) c.annotations = {};
       c.workloads.forEach(w => {
         const m = String(w.ready || '').match(/(\d+)\s*\/\s*(\d+)/);
         if (typeof w.replicas !== 'number') w.replicas = m ? +m[2] : (w.kind === 'CronJob' ? 0 : 1);
         if (typeof w.readyN !== 'number') w.readyN = m ? Math.min(+m[1], w.replicas) : w.replicas;
         w.ready = w.kind === 'CronJob' ? '—' : `${w.readyN}/${w.replicas}`;
+        if (!w.labels) w.labels = {
+          'app.kubernetes.io/instance': w.name,
+          'platform.io/schedule': SCHED_CODE[w.where] || 'cloud',
+          'platform.io/workload-kind': String(w.kind || '').toLowerCase()
+        };
+        if (!w.annotations) w.annotations = {};
       });
       if (!c.defaults) {
         const w0 = c.workloads[0] || {};
@@ -134,6 +172,18 @@ function setReplicas(w, n) {
 const $ = (s, r = document) => r.querySelector(s);
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function num(n) { return Number(n).toLocaleString('en-US'); }
+
+/* 标签徽标：超出 max 条的折叠为 +N，完整值放 title */
+function labelChips(labels, max = 3) {
+  const es = Object.entries(labels || {}).filter(([, v]) => v !== undefined && v !== null && v !== '');
+  if (!es.length) return '';
+  const one = ([k, v]) => `<span class="lbl" title="${esc(k)}">${esc(String(k).split('/').pop())}=${esc(v)}</span>`;
+  const head = es.slice(0, max).map(one).join('');
+  const rest = es.length > max
+    ? `<span class="lbl more" title="${esc(es.slice(max).map(([k, v]) => `${k}=${v}`).join('   '))}">+${es.length - max}</span>`
+    : '';
+  return `<span class="lbl-set">${head}${rest}</span>`;
+}
 
 /* 时间戳：2026-10-29 20:41 / 20:41 */
 function pad2(n) { return String(n).padStart(2, '0'); }
@@ -2493,6 +2543,7 @@ function viewWorkloadDetail(appId, compName, wlName) {
         · ${whereChip(wl.where)} <span class="mono">${esc(wl.cluster)}</span>
         ${wl.mesh === '已注入' && S.modules.mesh ? '· <span class="badge info">Sidecar 已注入</span>' : ''}
       </div>
+      <div class="lbl-row">${labelChips(wl.labels, 4)}</div>
     </div>
     <div class="acts">
       <button class="btn" onclick="wlGo('logs')">${icon('doc', '', 14)}日志</button>
