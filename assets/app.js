@@ -41,6 +41,7 @@ const S = {
   ruleQ: '',
   ruleType: 'all',
   ioShown: {},
+  alertSt: 'all',
   storeQ: '',
   yamlDiff: false,
   logs: { key: '', lines: [], level: 'all', q: '', container: '', paused: false, pending: 0, follow: true },
@@ -64,6 +65,7 @@ const PERSIST = [
   { key: 'releases' },
   { key: 'config' },
   { key: 'deps' },                    // 组件依赖边：可编辑，必须落盘
+  { key: 'alerts' },                  // 告警处置状态
   { key: 'clusters' },
   { key: 'envs' },
   { key: 'roles' },
@@ -161,6 +163,40 @@ function normalizeModel() {
   });
 }
 function wReady(w) { return w.kind === 'CronJob' ? '—' : `${w.readyN}/${w.replicas}`; }
+
+/* 应用健康度与状态由工作负载聚合推导，不手工设置：
+   健康度 = Σ 就绪实例 / Σ 期望实例；没有期望实例时返回 null（展示为 —） */
+function appHealth(app) {
+  let ready = 0, want = 0;
+  app.components.forEach(c => c.workloads.forEach(w => {
+    if (w.kind === 'CronJob' || !w.replicas) return;
+    want += w.replicas;
+    ready += Math.min(w.readyN || 0, w.replicas);
+  }));
+  if (!want) return null;
+  return Math.round(ready / want * 1000) / 10;
+}
+function appStatus(app) {
+  const wls = app.components.flatMap(c => c.workloads);
+  if (!wls.length) return '待部署';
+  const running = wls.filter(w => w.kind !== 'CronJob' && w.replicas > 0);
+  if (!running.length) return '已停止';
+  const bad = running.some(w => w.status === '异常' || w.status === '失败' || (w.readyN || 0) < w.replicas);
+  return bad ? '异常' : '运行中';
+}
+function healthText(app) {
+  const h = appHealth(app);
+  const c = h === null ? 'var(--text-3)' : h > 97 ? 'var(--success)' : h > 90 ? 'var(--warning)' : 'var(--danger)';
+  return { v: h === null ? '—' : h, color: c };
+}
+/* 停用/启用：真正把副本置零，而不是只改一个状态字段 */
+function setAppRunning(app, on) {
+  app.components.forEach(c => c.workloads.forEach(w => {
+    if (w.kind === 'CronJob') return;
+    if (!on) { w.pausedReplicas = w.replicas; setReplicas(w, 0); }
+    else if (w.pausedReplicas) { setReplicas(w, w.pausedReplicas); delete w.pausedReplicas; }
+  }));
+}
 function setReplicas(w, n) {
   w.replicas = n;
   w.readyN = n;
@@ -278,6 +314,7 @@ const STK = {
   '告警': 'warn', '降级': 'warn', '维护中': 'warn', '处理中': 'warn',
   '待调度': 'muted', '待执行': 'muted', '已停用': 'muted', '已忽略': 'muted', '跳过': 'muted', '未启用': 'muted',
   '未处理': 'bad', '失败': 'bad', '离线': 'bad', '已停止': 'bad', '严重': 'bad',
+  '异常': 'bad', '待部署': 'muted', '已关闭': 'muted',
   '警告': 'warn', '提示': 'muted', 'P0': 'bad', 'P1': 'warn', 'P2': 'muted',
   '正常': 'ok', '慢调用': 'warn', '错误': 'bad', '超时': 'bad',
   '待激活': 'warn', '接入中': 'info', '已封锁': 'muted',
@@ -667,6 +704,11 @@ function fField(label, control, hint = '', req = false) {
 function fInput(k, value = '', ph = '', type = 'text') {
   return `<input class="input" data-k="${k}" type="${type}" value="${esc(value)}" placeholder="${esc(ph)}" />`;
 }
+/* 只读字段：值由上游流程写入，表单不接收修改 */
+function fReadonly(value, ph = '') {
+  return `<input class="input" value="${esc(value)}" placeholder="${esc(ph)}" readonly
+    style="background:#f4f6fb;color:var(--text-2);cursor:not-allowed" />`;
+}
 function fSelect(k, opts, value, attrs = '') {
   return `<select class="input" data-k="${k}"${attrs}>${opts.map(o => {
     const v = Array.isArray(o) ? o[0] : o, n = Array.isArray(o) ? o[1] : o;
@@ -949,7 +991,7 @@ function viewApps() {
               <span style="font-size:13.5px;font-weight:650">${esc(a.name)}</span>
               ${badge(a.level)}
             </div>
-            ${badge(a.status)}
+            ${badge(appStatus(a))}
           </div>
           <div class="tiny muted" style="margin-top:5px;min-height:32px;line-height:1.6">${esc(a.desc)}</div>
           ${(() => {
@@ -968,7 +1010,7 @@ function viewApps() {
             <div class="link" title="查看该应用的组件" onclick="event.stopPropagation();openComponentsOf('${a.id}')">
               <div class="tiny muted">组件</div><div style="font-size:16px;font-weight:660;color:inherit">${a.components.length}</div></div>
             <div><div class="tiny muted">工作负载</div><div style="font-size:16px;font-weight:660">${wlCount}</div></div>
-            <div><div class="tiny muted">健康度</div><div style="font-size:16px;font-weight:660;color:${a.health > 97 ? 'var(--success)' : a.health > 90 ? 'var(--warning)' : a.health > 0 ? 'var(--danger)' : 'var(--text-3)'}">${a.health > 0 ? a.health + '<span style="font-size:10px">%</span>' : '—'}</div></div>
+            <div><div class="tiny muted">健康度</div><div style="font-size:16px;font-weight:660;color:${healthText(a).color}">${healthText(a).v}${healthText(a).v === '—' ? '' : '<span style="font-size:10px">%</span>'}</div></div>
           </div>
         </div>
         <div style="padding:9px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px" class="tiny muted">
@@ -1022,7 +1064,7 @@ function viewAppDetail(id) {
       <div style="display:flex;align-items:center;gap:9px">
         <span style="color:var(--primary)">${icon('box', '', 19)}</span>
         <div class="ttl">${esc(app.name)}</div>
-        ${badge(app.level)} ${badge(app.status)}
+        ${badge(app.level)} ${badge(appStatus(app))}
       </div>
       <div class="sub">${esc(app.desc)}</div>
       <div style="display:flex;align-items:center;gap:7px;margin-top:5px">
@@ -1046,7 +1088,7 @@ function viewAppDetail(id) {
       <div><div class="tiny muted">负责人</div><div style="font-weight:600;margin-top:2px">${esc(app.owner)}</div></div>
       <div><div class="tiny muted">组件</div><div style="font-weight:600;margin-top:2px">${app.components.length}</div></div>
       <div><div class="tiny muted">工作负载</div><div style="font-weight:600;margin-top:2px">${wlCount}</div></div>
-      <div><div class="tiny muted">健康度</div><div style="font-weight:600;margin-top:2px;color:var(--success)">${app.health || '—'}%</div></div>
+      <div><div class="tiny muted">健康度</div><div style="font-weight:600;margin-top:2px;color:${healthText(app).color}">${healthText(app).v === '—' ? '—' : healthText(app).v + '%'}</div></div>
       <div><div class="tiny muted">部署环境</div><div style="margin-top:2px;display:flex;gap:5px">${app.envs.map(e => `<span class="chip">${e}</span>`).join('')}</div></div>
       <div style="margin-left:auto"><div class="tiny muted">最近更新</div><div class="mono" style="margin-top:2px;font-size:11.5px">${app.updated}</div></div>
     </div>
@@ -1972,7 +2014,7 @@ function viewAccessList() {
     <div><div class="ttl">访问入口</div>
       <div class="sub">所有应用对外暴露的统一视图。支持<b>独立域名</b>与<b>平台网关路径</b>两种形态，鉴权、限流与证书统一在网关层处理。</div></div>
     <div class="acts">
-      <button class="btn">证书管理</button>
+      <button class="btn" disabled title="证书管理尚未开放，当前由访问入口的 TLS 配置承担">证书管理</button>
       <button class="btn primary" onclick="newAccessGlobal()">${icon('plus', '', 14)}新增入口</button>
     </div>
   </div>
@@ -4414,7 +4456,10 @@ function viewArtifacts() {
   return `
   <div class="page-head">
     <div><div class="ttl">制品仓库</div><div class="sub">镜像与制品统一归档，带签名校验与漏洞扫描；边缘镜像额外标记 CPU 架构。</div></div>
-    <div class="acts"><button class="btn">扫描策略</button><button class="btn primary">拉取指令</button></div>
+    <div class="acts">
+      <button class="btn" disabled title="扫描策略配置尚未开放">扫描策略</button>
+      <button class="btn" disabled title="按仓库生成的拉取指令尚未开放">拉取指令</button>
+    </div>
   </div>
   <div class="card">
     <div class="toolbar">
@@ -5731,7 +5776,7 @@ function viewEdgeDevices() {
   return `
   <div class="page-head">
     <div><div class="ttl">端设备</div><div class="sub">门店 POS、电子价签、摄像头等终端接入状态与固件版本。</div></div>
-    <div class="acts"><button class="btn">批量固件升级</button></div>
+    <div class="acts"><button class="btn" disabled title="批量固件升级尚未开放">批量固件升级</button></div>
   </div>
   ${edgeBanner()}
   ${edgeTabs('/edge/devices')}
@@ -6146,33 +6191,79 @@ function viewAlerts() {
   return `
   <div class="page-head">
     <div><div class="ttl">告警中心</div><div class="sub">按严重程度聚合，支持静默、认领与升级通知。</div></div>
-    <div class="acts"><button class="btn">告警规则</button><button class="btn">通知渠道</button></div>
+    <div class="acts">
+      <button class="btn" disabled title="告警规则配置尚未开放">告警规则</button>
+      <button class="btn" disabled title="通知渠道配置尚未开放">通知渠道</button>
+    </div>
   </div>
   <div class="grid g4" style="margin-bottom:16px">
-    <div class="stat"><div class="lab">严重</div><div class="val" style="color:var(--danger)">2</div><div class="foot">需立即处理</div></div>
-    <div class="stat"><div class="lab">警告</div><div class="val" style="color:var(--warning)">3</div><div class="foot">2 处理中</div></div>
-    <div class="stat"><div class="lab">今日已恢复</div><div class="val">11</div><div class="foot">平均恢复 8m</div></div>
-    <div class="stat"><div class="lab">静默中</div><div class="val">1</div><div class="foot">证书到期提醒</div></div>
+    <div class="stat"><div class="lab">严重</div><div class="val" style="color:var(--danger)">${alertCount('严重')}</div><div class="foot">未关闭的严重告警</div></div>
+    <div class="stat"><div class="lab">警告</div><div class="val" style="color:var(--warning)">${alertCount('警告')}</div><div class="foot">${alertCount('警告', '处理中')} 处理中</div></div>
+    <div class="stat"><div class="lab">已关闭</div><div class="val">${alertCount(null, '已关闭')}</div><div class="foot">本次会话累计处理</div></div>
+    <div class="stat"><div class="lab">待认领</div><div class="val" style="color:${alertCount(null, '未处理') ? 'var(--warning)' : 'inherit'}">${alertCount(null, '未处理')}</div><div class="foot">尚未指派负责人</div></div>
   </div>
   <div class="card">
     <div class="toolbar">
-      <button class="filter-pill on">全部</button><button class="filter-pill">未处理</button><button class="filter-pill">处理中</button>
+      ${[['all', '全部'], ['未处理', '未处理'], ['处理中', '处理中'], ['已关闭', '已关闭'], ['已忽略', '已忽略']].map(([k, n]) =>
+        `<button class="filter-pill ${(S.alertSt || 'all') === k ? 'on' : ''}" onclick="alertFilter('${k}')">${n}</button>`).join('')}
       <div class="grow"><span class="tiny muted" style="align-self:center">最近 24 小时</span></div>
     </div>
     <table class="table">
       <thead><tr><th>级别</th><th>告警内容</th><th>关联应用</th><th>资源</th><th>时间</th><th>状态</th><th class="right">操作</th></tr></thead>
-      <tbody>${DB.alerts.map(a => `
-        <tr>
-          <td>${badge(a.level)}</td>
-          <td class="name">${esc(a.title)}</td>
-          <td>${esc(a.app)}</td>
-          <td class="mono" style="font-size:11px">${esc(a.res)}</td>
-          <td class="tiny muted">${a.time}</td>
-          <td>${badge(a.status)}</td>
-          <td class="right"><button class="btn sm ghost" onclick="toast('已认领')">认领</button></td>
-        </tr>`).join('')}</tbody>
+      <tbody>${alertRows()}</tbody>
     </table>
   </div>`;
+}
+
+/* 告警处置：未处理 → 处理中 → 已关闭，忽略为旁路终态 */
+function alertCount(level, status) {
+  return DB.alerts.filter(a => {
+    if (level && a.level !== level) return false;
+    if (status) return a.status === status;
+    return a.status !== '已关闭' && a.status !== '已忽略';
+  }).length;
+}
+function alertFilter(k) { S.alertSt = k; route(); }
+function alertRows() {
+  const st = S.alertSt || 'all';
+  const idx = DB.alerts.map((_, i) => i).filter(i => st === 'all' || DB.alerts[i].status === st);
+  if (!idx.length) {
+    return `<tr><td colspan="7"><div class="empty" style="padding:26px 16px"><p style="margin:0">当前筛选下没有告警。</p></div></td></tr>`;
+  }
+  return idx.map(i => {
+    const a = DB.alerts[i];
+    const acts = a.status === '未处理'
+      ? `<button class="btn sm ghost" onclick="alertAct(${i},'claim')">认领</button>
+         <button class="btn sm" onclick="alertAct(${i},'ignore')">忽略</button>`
+      : a.status === '处理中'
+        ? `<button class="btn sm primary" onclick="alertAct(${i},'close')">关闭</button>`
+        : `<span class="tiny muted">${esc(a.closedAt || a.ignoredAt || '已归档')}</span>`;
+    return `<tr>
+      <td>${badge(a.level)}</td>
+      <td class="name">${esc(a.title)}</td>
+      <td>${esc(a.app)}</td>
+      <td class="mono" style="font-size:11px">${esc(a.res)}</td>
+      <td class="tiny muted">${esc(a.time)}</td>
+      <td>${badge(a.status)}${a.owner ? `<div class="sub">${esc(a.owner)}</div>` : ''}</td>
+      <td class="right">${acts}</td>
+    </tr>`;
+  }).join('');
+}
+function alertAct(i, act) {
+  const a = DB.alerts[i];
+  if (!a) return;
+  if (act === 'claim') {
+    a.status = '处理中'; a.owner = DB.user.name; a.claimedAt = clockNow();
+    toast(`已认领，负责人 ${DB.user.name}`, 'ok');
+  } else if (act === 'close') {
+    a.status = '已关闭'; a.closedAt = clockNow();
+    toast('告警已关闭', 'ok');
+  } else if (act === 'ignore') {
+    a.status = '已忽略'; a.ignoredAt = clockNow();
+    toast('已忽略，不再提醒', 'warn');
+  }
+  saveSnapshot();
+  route();
 }
 
 /* ---------- 模块管理（核心） ---------- */
@@ -7124,7 +7215,7 @@ function componentConfig(appId, compName) {
       </div>
       <div class="form-row">
         ${fField('构建方式', fSelect('buildMode', BUILD_MODES, comp.buildMode || 'Dockerfile 构建'))}
-        ${fField('镜像版本', fInput('version', comp.version))}
+        ${fField('镜像版本', fReadonly(comp.version), '由发布流程写入，不在此处修改')}
       </div>
       <div class="form-sec">服务契约</div>
       <div class="form-row">
@@ -7142,7 +7233,6 @@ function componentConfig(appId, compName) {
         ${fField('内存', fSelect('mem', MEM_OPTS, comp.defaults.mem))}
       </div>`,
     onSubmit: st => {
-      if (!st.version) return '请填写镜像版本';
       const port = clampInt(st.port, 1, 65535, comp.port || 8080);
       if (!/^[1-9]\d{1,4}$/.test(String(st.port))) return '端口需为 1-65535 之间的整数';
       for (const [k, label] of [['healthPath', '存活探针'], ['readyPath', '就绪探针']]) {
@@ -7181,7 +7271,6 @@ function componentConfig(appId, compName) {
       apply('repo', st.repo, '代码仓库');
       apply('branch', st.branch || 'main', '分支');
       apply('buildMode', st.buildMode, '构建方式');
-      apply('version', st.version, '版本');
       apply('protocol', st.protocol, '协议');
       apply('port', port, '端口');
       apply('healthPath', st.healthPath, '存活探针');
@@ -7234,7 +7323,7 @@ function newComponent(appId) {
       }
       app.components.push(comp);
       app.updated = nowStamp();
-      if (app.health === 0) app.health = 100;
+      if (app.health === 0) app.health = 100;   // 历史字段，仅为兼容旧快照
       app.events.unshift({ t: clockNow(), k: 'ok', tx: `组件 <b>${esc(comp.name)}</b> 已创建` });
       saveSnapshot();
       S.appComp = comp.name;
@@ -7356,6 +7445,8 @@ function deleteComponent(appId, compName) {
 
 function deleteApp(app) {
   const wlCount = app.components.reduce((s, c) => s + c.workloads.length, 0);
+  const running = app.components.flatMap(c => c.workloads)
+    .filter(w => w.kind !== 'CronJob' && w.replicas > 0);
   formModal({
     title: '删除应用？',
     desc: `${app.name} · ${app.level}`,
@@ -7364,9 +7455,15 @@ function deleteApp(app) {
     body: `<div class="danger-box">
         将级联删除 <b>${app.components.length}</b> 个组件、<b>${wlCount}</b> 个工作负载，以及该应用的访问入口与依赖声明。
       </div>
+      ${running.length ? `<div class="danger-box" style="margin-top:10px">
+        当前仍有 <b>${running.length}</b> 个工作负载在运行：<span class="mono" style="font-size:11px">${running.slice(0, 3).map(w => esc(w.name)).join('、')}${running.length > 3 ? ' 等' : ''}</span>。
+        按规则 R-05，应先停用应用；确认要中断线上流量时勾选下面的强制删除。
+      </div>
+      ${fCheck('force', '我知道这会中断线上流量，强制删除', false)}` : ''}
       ${fField('输入应用名称确认', fInput('confirm', '', app.name), `需完整输入「${app.name}」`)}`,
     onSubmit: st => {
       if (st.confirm !== app.name) return `请输入完整名称「${app.name}」以确认删除`;
+      if (running.length && !st.force) return `仍有 ${running.length} 个工作负载在运行，请先停用应用，或勾选强制删除`;
       DB.apps = DB.apps.filter(a => a.id !== app.id);
       delete DB.access[app.id];
       delete DB.deps[app.id];
@@ -7385,7 +7482,7 @@ function deleteApp(app) {
 
 /* ---------- 应用级更多操作 ---------- */
 function appMenu(app) {
-  const stopped = app.status === '已停止';
+  const stopped = appStatus(app) === '已停止';
   const mask = formModal({
     title: `管理「${app.name}」`,
     desc: '停用只影响调度与入口，不删除任何配置。',
@@ -7405,7 +7502,7 @@ function appMenu(app) {
     onSubmit: () => null
   });
   mask.querySelector('[data-act2=toggle]').onclick = () => {
-    app.status = stopped ? '运行中' : '已停止';
+    setAppRunning(app, stopped);
     app.updated = nowStamp();
     app.events.unshift({ t: clockNow(), k: stopped ? 'ok' : 'warn', tx: `应用 <b>${esc(app.name)}</b> 已${stopped ? '启用' : '停用'}` });
     saveSnapshot();

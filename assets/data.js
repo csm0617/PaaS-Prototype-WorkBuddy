@@ -300,7 +300,7 @@ window.DB = {
           image: 'hub.corp.io/mkt/rule-engine',
           version: 'v2.0.0',
           workloads: [
-            { name: 'rule-engine', kind: 'Deployment', ready: '0/2', image: 'v2.0.0', cpu: '0 / 4c', mem: '0 / 4Gi', status: '已停止', where: '云端', cluster: 'dev-beijing-01', mesh: '—', restarts: 0, age: '9d' }
+            { name: 'rule-engine', kind: 'Deployment', ready: '0/0', image: 'v2.0.0', cpu: '0 / 4c', mem: '0 / 4Gi', status: '已停止', where: '云端', cluster: 'dev-beijing-01', mesh: '—', restarts: 0, age: '9d' }
           ]
         }
       ],
@@ -757,7 +757,7 @@ window.DB = {
     { level: '严重', title: 'channel-adapter 副本不足 (2/3)', app: '支付网关', res: 'prod-shanghai-01 / channel-adapter', time: '13:28', status: '未处理' },
     { level: '严重', title: '边缘节点 edge-hz-009 内存使用率 91%', app: '—', res: 'edge-hz-009', time: '13:10', status: '未处理' },
     { level: '警告', title: '支付渠道超时率 6.2%（阈值 3%）', app: '支付网关', res: 'pay-router / 某银行', time: '13:25', status: '处理中' },
-    { level: '警告', title: '流水线 #156 失败', app: '支付网关', res: 'pl-pay', time: '13:24', status: '已通知' },
+    { level: '警告', title: '流水线 #156 失败', app: '支付网关', res: 'pl-pay', time: '13:24', status: '处理中' },
     { level: '警告', title: '端设备 4 台心跳超时', app: '边缘视频分析', res: 'edge-cd-store', time: '08:12', status: '处理中' },
     { level: '提示', title: '证书将于 14 天后到期', app: '—', res: '*.corp.io', time: '昨天', status: '已忽略' }
   ],
