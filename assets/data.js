@@ -51,6 +51,7 @@ window.DB = {
         {
           name: 'api-gateway',
           role: '入口网关',
+          port: 80,
           runtime: 'Envoy 1.29',
           image: 'hub.corp.io/platform/gateway',
           version: 'v3.1.4',
@@ -61,6 +62,7 @@ window.DB = {
         {
           name: 'stock-collector',
           role: '边缘采集',
+          port: 9100,
           runtime: 'Rust 1.77',
           image: 'hub.corp.io/retail/stock-collector',
           version: 'v0.8.3',
@@ -133,6 +135,7 @@ window.DB = {
         {
           name: 'pay-router',
           role: '核心服务',
+          port: 8443,
           runtime: 'Go 1.22',
           image: 'hub.corp.io/pay/pay-router',
           version: 'v4.0.7',
@@ -192,6 +195,7 @@ window.DB = {
         {
           name: 'video-ingest',
           role: '流接入',
+          port: 9000,
           runtime: 'Go 1.22',
           image: 'hub.corp.io/edge/video-ingest',
           version: 'v1.4.2',
@@ -258,6 +262,8 @@ window.DB = {
         {
           name: 'mqtt-broker',
           role: '接入层',
+          port: 8883,
+          ports: [8083],
           runtime: 'EMQX 5.6',
           image: 'hub.corp.io/iot/mqtt-broker',
           version: 'v5.6.1',
